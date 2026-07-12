@@ -386,8 +386,11 @@ async def update_analysis(aid: str, body: AnalysisUpdate, page: int = 0):
         agg = _reaggregate(doc)
         await analyses_col.update_one(
             {"id": aid},
-            {"$set": {"pages": pages, "data": agg.to_dict(),
-                      "updated_at": _now_iso()}},
+            {"$set": {
+                f"pages.{page}.data": target_bd.to_dict(),
+                "data": agg.to_dict(),
+                "updated_at": _now_iso(),
+            }},
         )
         return _bd_to_response(target_bd, doc, page_index=page)
     # Legacy single-page path
@@ -461,8 +464,11 @@ async def calibrate(aid: str, body: CalibrationRequest, page: int = 0):
         agg = _reaggregate(doc)
         await analyses_col.update_one(
             {"id": aid},
-            {"$set": {"pages": pages, "data": agg.to_dict(),
-                      "updated_at": _now_iso()}},
+            {"$set": {
+                f"pages.{page}.data": bd.to_dict(),
+                "data": agg.to_dict(),
+                "updated_at": _now_iso(),
+            }},
         )
         return _bd_to_response(bd, doc, page_index=page)
     await analyses_col.update_one(

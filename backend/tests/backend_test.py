@@ -278,17 +278,11 @@ class TestMultiPage:
         assert r.status_code == 404
 
     def test_get_page_preview_png(self, api):
-        """Sanity check preview endpoint. Tolerant of the DATA-LOSS BUG where
-        prior PUT/calibrate calls (from other tests in this suite OR by the app)
-        wipe per-page preview_b64 fields (see reported bug)."""
+        """Each page preview must be a real PNG. Previously wiped by data-loss bug."""
         for i in range(3):
             r = api.get(f"{BASE_URL}/api/analysis/{MULTI_ID}/pages/{i}/preview",
                         timeout=15)
-            if r.status_code == 404:
-                print(f"WARN: page {i} preview 404 — likely wiped by "
-                      "PUT/calibrate data-loss bug")
-                continue
-            assert r.status_code == 200
+            assert r.status_code == 200, f"page {i} preview status={r.status_code}"
             assert r.headers.get("content-type", "").startswith("image/png")
             assert len(r.content) > 1000, f"page {i} preview too small: {len(r.content)}"
 
@@ -431,10 +425,7 @@ class TestMultiPage:
         assert abs(agg["wall_length"] - expected_sum) < 0.2
 
     def test_multi_report_pdf(self, api):
-        """Multi-page report PDF valid, contains 3 pages.
-        NOTE: expected >20 KB per spec, but per-page preview_b64 was corrupted
-        by PUT/calibrate endpoints (see reported bug). Still asserts PDF is
-        valid + multi-page structure exists."""
+        """Multi-page report PDF valid, contains 3 pages, and >20KB (with embedded previews)."""
         r = api.get(f"{BASE_URL}/api/analysis/{MULTI_ID}/report", timeout=30)
         assert r.status_code == 200
         assert r.content[:5] == b"%PDF-"
@@ -442,10 +433,10 @@ class TestMultiPage:
         assert r.content.count(b"/Type /Page\n") >= 3, (
             f"expected >=3 pages, found {r.content.count(b'/Type /Page')}"
         )
-        # Warn but do not fail on size (see reported bug)
-        if len(r.content) <= 20 * 1024:
-            print(f"WARN: PDF size {len(r.content)} bytes < 20KB "
-                  "— preview_b64 likely wiped by PUT/calibrate bug")
+        # After the fix, per-page preview_b64 must survive → PDF must embed images → >20 KB
+        assert len(r.content) > 20 * 1024, (
+            f"PDF too small: {len(r.content)} bytes — per-page previews likely wiped."
+        )
 
     def test_analyses_list_page_count(self, api):
         r = api.get(f"{BASE_URL}/api/analyses", timeout=15)
@@ -456,4 +447,109 @@ class TestMultiPage:
         assert by_id[MULTI_ID]["page_count"] == 3
         assert DEMO_ID in by_id
         assert by_id[DEMO_ID]["page_count"] == 1
+
+    def test_previews_survive_mutations_bugfix_verification(self, api):
+        """RE-VERIFY iteration-3 CRITICAL data-loss bug is FIXED.
+
+        Before fix: PUT/calibrate replaced whole `pages` array with a copy fetched
+        without preview_b64, wiping per-page images. After fix: positional $set
+        `pages.{page}.data` preserves preview_b64 on every page.
+
+        Flow:
+          1. All 3 previews return 200 image/png BEFORE mutations.
+          2. PUT page=1 with a door-only body → still 200 image/png on all pages.
+          3. POST calibrate page=0 → still 200 image/png on all pages.
+          4. GET report → PDF >20 KB with %PDF header.
+          5. GET pages/1 reflects mutated data (doors=1 from PUT).
+        """
+        # Step 1: baseline — all previews 200
+        pre_sizes = []
+        for i in range(3):
+            r = api.get(f"{BASE_URL}/api/analysis/{MULTI_ID}/pages/{i}/preview",
+                        timeout=15)
+            assert r.status_code == 200, f"pre-mutation page {i} preview NOT 200"
+            assert r.headers.get("content-type", "").startswith("image/png")
+            pre_sizes.append(len(r.content))
+
+        # Save p1/p0 state for restore
+        p1_before = api.get(f"{BASE_URL}/api/analysis/{MULTI_ID}/pages/1",
+                            timeout=15).json()
+        restore_p1 = {
+            "detected_objects": [
+                {
+                    "id": o.get("id"), "type": o.get("type"),
+                    "label": o.get("label", ""),
+                    "x": o.get("x", 0), "y": o.get("y", 0),
+                    "w": o.get("w", 0), "h": o.get("h", 0),
+                    "points": o.get("points", []),
+                    "width_ft": o.get("width_ft"),
+                    "length_ft": o.get("length_ft"),
+                    "confidence": o.get("confidence", 90),
+                } for o in p1_before.get("detected_objects", [])
+            ],
+            "room_list": p1_before.get("room_list", []),
+        }
+
+        try:
+            # Step 2: PUT page=1 with single door object
+            put_body = {
+                "detected_objects": [{
+                    "id": "test", "type": "door", "label": "t",
+                    "x": 0.1, "y": 0.1, "w": 0.05, "h": 0.05,
+                    "points": [], "confidence": 100,
+                }]
+            }
+            r = api.put(f"{BASE_URL}/api/analysis/{MULTI_ID}",
+                        json=put_body, params={"page": 1}, timeout=15)
+            assert r.status_code == 200, r.text
+
+            # All 3 previews STILL 200 after PUT
+            for i in range(3):
+                r2 = api.get(f"{BASE_URL}/api/analysis/{MULTI_ID}/pages/{i}/preview",
+                             timeout=15)
+                assert r2.status_code == 200, (
+                    f"POST-PUT page {i} preview status={r2.status_code} — "
+                    "DATA-LOSS BUG STILL PRESENT"
+                )
+                assert r2.headers.get("content-type", "").startswith("image/png")
+                assert len(r2.content) > 1000
+
+            # Step 5: verify page 1 shows the mutated doors=1
+            got_p1 = api.get(f"{BASE_URL}/api/analysis/{MULTI_ID}/pages/1",
+                             timeout=15).json()
+            assert got_p1["doors"] == 1, f"expected doors=1 got {got_p1['doors']}"
+            assert got_p1["windows"] == 0
+            # Note: recompute_from_objects keeps prior wall totals when new object
+            # list has no wall objects (analyzer.py L528-535), so wall_length may
+            # be non-zero here. That's a separate concern from the data-loss bug.
+
+            # Step 3: POST calibrate page=0
+            cal_body = {"p1": [0.08, 0.11], "p2": [0.92, 0.11], "known_ft": 50.0}
+            r3 = api.post(f"{BASE_URL}/api/analysis/{MULTI_ID}/calibrate",
+                          json=cal_body, params={"page": 0}, timeout=15)
+            assert r3.status_code == 200, r3.text
+
+            # All 3 previews STILL 200 after calibrate
+            for i in range(3):
+                r4 = api.get(f"{BASE_URL}/api/analysis/{MULTI_ID}/pages/{i}/preview",
+                             timeout=15)
+                assert r4.status_code == 200, (
+                    f"POST-CAL page {i} preview status={r4.status_code} — "
+                    "DATA-LOSS BUG STILL PRESENT (calibrate path)"
+                )
+                assert r4.headers.get("content-type", "").startswith("image/png")
+                assert len(r4.content) > 1000
+
+            # Step 4: report PDF > 20 KB, starts with %PDF
+            r5 = api.get(f"{BASE_URL}/api/analysis/{MULTI_ID}/report", timeout=30)
+            assert r5.status_code == 200
+            assert r5.content[:5] == b"%PDF-"
+            assert len(r5.content) > 20 * 1024, (
+                f"PDF size={len(r5.content)} bytes — should exceed 20 KB with "
+                "per-page embedded previews"
+            )
+        finally:
+            # Restore page 1
+            api.put(f"{BASE_URL}/api/analysis/{MULTI_ID}",
+                    json=restore_p1, params={"page": 1}, timeout=15)
 
