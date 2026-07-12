@@ -70,15 +70,30 @@ the same extracted building data.
       user draws a two-point segment on the plan viewer and enters its known
       length in feet; backend rescales every wall polyline (length_ft),
       door/window (width_ft), and computes built-up area. Sets
-      `scale_detected=true`, `approximate=false`, `scale_note="User calibrated…"`.
-      Guards against degenerate/zero-length segments (400).
-- [x] **Move/resize in Edit Mode**: Selected rect objects (doors, windows,
-      rooms, bathrooms) show 4 white corner resize handles and a draggable
-      body. Wall polylines show circular endpoint handles for each vertex.
-      All motion is clamped to the [0,1] canvas.
-- [x] Amber "No scale detected" banner now surfaces a **Calibrate now** CTA.
+      `scale_detected=true`, `approximate=false`.
+- [x] **Move/resize in Edit Mode**: 4 corner resize handles on rects + wall
+      polyline endpoint handles. Motion clamped to [0,1].
+- [x] Amber "No scale detected" banner surfaces a **Calibrate now** CTA.
 - [x] Calibrate + Edit modes are mutually exclusive.
-- [x] User-friendly 402 error message when LLM budget is exhausted.
+- [x] Friendly 402 error message when LLM budget is exhausted.
+
+### Iteration 3 (2026-02-13)
+- [x] **Multi-page PDF support**: `POST /api/analyze` now uses
+      `analyze_document` — every PDF page (up to 8) is converted, analyzed
+      independently via Gemini vision, and stored as `pages: [{page_index,
+      preview_b64, data}]`. Top-level `data` becomes an aggregate summary.
+- [x] New endpoints: `GET /api/analysis/{id}/pages/{n}` and
+      `/pages/{n}/preview` for per-page drill-down.
+- [x] `PUT /api/analysis/{id}` and `POST /api/analysis/{id}/calibrate` now
+      accept a `?page=N` query param. Positional Mongo `$set: pages.{N}.data`
+      preserves other pages' preview_b64 (critical bug caught + fixed in
+      iteration_3 → iteration_4 regression cycle).
+- [x] PDF report renders aggregate + per-page breakdown (image + stat table)
+      when the doc has multiple pages.
+- [x] Frontend page-selector strip appears when `page_count > 1`; each tab
+      loads its own preview + detected_objects + rooms; stat cards switch to
+      "Building totals · N pages" showing aggregate.
+- [x] History page shows a "{n} pages" pill next to multi-page rows.
 
 ## Known blocker (P0 — external)
 - **EMERGENT_LLM_KEY balance = 0** at runtime.
