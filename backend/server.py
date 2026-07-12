@@ -188,7 +188,20 @@ async def analyze(file: UploadFile = File(...)):
         bd, preview_png = await analyze_floor_plan(raw, file.filename, session_id=analysis_id)
     except Exception as e:
         logger.exception("Analysis failed")
-        raise HTTPException(500, f"Analysis failed: {e}")
+        msg = str(e)
+        low = msg.lower()
+        if "budget" in low or "quota" in low or "insufficient" in low:
+            raise HTTPException(
+                status_code=402,
+                detail=("AI vision quota exhausted. Top up your Emergent Universal "
+                        "Key from Profile → Universal Key → Add Balance, then retry."),
+            )
+        if "not configured" in low or "api_key" in low:
+            raise HTTPException(
+                status_code=503,
+                detail="AI vision service is not configured on this deployment.",
+            )
+        raise HTTPException(500, f"Analysis failed: {msg}")
 
     doc = {
         "id": analysis_id,
