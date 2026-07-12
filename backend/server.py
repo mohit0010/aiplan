@@ -317,6 +317,11 @@ async def calibrate(aid: str, body: CalibrationRequest):
     bd = _doc_to_bd(doc)
     if bd.preview_width <= 0 or bd.preview_height <= 0:
         raise HTTPException(400, "Preview dimensions missing")
+    # Guard degenerate segments
+    dx = (body.p2[0] - body.p1[0]) * bd.preview_width
+    dy = (body.p2[1] - body.p1[1]) * bd.preview_height
+    if (dx * dx + dy * dy) < 4.0:
+        raise HTTPException(400, "Segment too short — draw a longer reference segment.")
     bd = calibrate_scale(bd, body.p1, body.p2, body.known_ft)
     bd = recompute_from_objects(bd)
     await analyses_col.update_one(

@@ -163,6 +163,8 @@ const PlanViewer = ({
   };
 
   // ------ Object drag handlers ------
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
   const beginObjDrag = (e, obj, kind) => {
     if (!editMode) return;
     e.stopPropagation();
@@ -187,12 +189,12 @@ const PlanViewer = ({
       if (snap.points && snap.points.length) {
         next = {
           ...snap,
-          x: snap.x + dx,
-          y: snap.y + dy,
-          points: snap.points.map((p) => [p[0] + dx, p[1] + dy]),
+          x: clamp01(snap.x + dx),
+          y: clamp01(snap.y + dy),
+          points: snap.points.map((p) => [clamp01(p[0] + dx), clamp01(p[1] + dy)]),
         };
       } else {
-        next = { ...snap, x: snap.x + dx, y: snap.y + dy };
+        next = { ...snap, x: clamp01(snap.x + dx), y: clamp01(snap.y + dy) };
       }
     } else if (objDrag.kind.startsWith("corner-")) {
       const corner = objDrag.kind.slice("corner-".length);
@@ -209,15 +211,15 @@ const PlanViewer = ({
       }
       next = {
         ...snap,
-        x,
-        y,
-        w: Math.max(0.005, w),
-        h: Math.max(0.005, h),
+        x: clamp01(x),
+        y: clamp01(y),
+        w: Math.max(0.005, Math.min(1, w)),
+        h: Math.max(0.005, Math.min(1, h)),
       };
     } else if (objDrag.kind.startsWith("point-")) {
       const idx = parseInt(objDrag.kind.slice("point-".length), 10);
       const newPts = snap.points.map((p, i) =>
-        i === idx ? [p[0] + dx, p[1] + dy] : p
+        i === idx ? [clamp01(p[0] + dx), clamp01(p[1] + dy)] : p
       );
       next = { ...snap, points: newPts };
     }

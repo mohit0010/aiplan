@@ -50,7 +50,8 @@ the same extracted building data.
 - PDF report with preview, metrics, and room list.
 - Light + Dark mode.
 
-## Implemented (2026-02-13)
+## Implemented
+### Iteration 1 (2026-02-13)
 - [x] Full backend pipeline with modular BuildingData model.
 - [x] Gemini 3 Flash vision integration for structured extraction.
 - [x] Homepage with hero + upload dropzone (drag & drop, progress, validation).
@@ -63,6 +64,21 @@ the same extracted building data.
 - [x] Professional PDF report (ReportLab) with preview + metrics + room list.
 - [x] Light/Dark themes with Cabinet Grotesk + IBM Plex.
 - [x] `data-testid` on all interactive/critical elements.
+
+### Iteration 2 (2026-02-13)
+- [x] **Scale calibration**: `POST /api/analysis/{id}/calibrate` endpoint —
+      user draws a two-point segment on the plan viewer and enters its known
+      length in feet; backend rescales every wall polyline (length_ft),
+      door/window (width_ft), and computes built-up area. Sets
+      `scale_detected=true`, `approximate=false`, `scale_note="User calibrated…"`.
+      Guards against degenerate/zero-length segments (400).
+- [x] **Move/resize in Edit Mode**: Selected rect objects (doors, windows,
+      rooms, bathrooms) show 4 white corner resize handles and a draggable
+      body. Wall polylines show circular endpoint handles for each vertex.
+      All motion is clamped to the [0,1] canvas.
+- [x] Amber "No scale detected" banner now surfaces a **Calibrate now** CTA.
+- [x] Calibrate + Edit modes are mutually exclusive.
+- [x] User-friendly 402 error message when LLM budget is exhausted.
 
 ## Known blocker (P0 — external)
 - **EMERGENT_LLM_KEY balance = 0** at runtime.
