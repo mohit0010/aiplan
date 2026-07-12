@@ -1,0 +1,48 @@
+// Central data-testid registry for PlanMeasure AI.
+export const HOME = {
+  emergentLink: "home-emergent-link",
+  heroCtaUpload: "home-hero-cta-upload",
+  heroCtaDemo: "home-hero-cta-demo",
+  uploadDropzone: "upload-dropzone",
+  uploadInput: "upload-file-input",
+  uploadButton: "upload-analyze-button",
+  uploadProgress: "upload-progress",
+  themeToggle: "theme-toggle",
+  navHome: "nav-home",
+  navHistory: "nav-history",
+};
+
+export const ANALYSIS = {
+  page: "analysis-page",
+  statTotalWall: "stat-total-wall",
+  statExternalWall: "stat-external-wall",
+  statInternalWall: "stat-internal-wall",
+  statRooms: "stat-rooms",
+  statBathrooms: "stat-bathrooms",
+  statDoors: "stat-doors",
+  statWindows: "stat-windows",
+  statArea: "stat-area",
+  statConfidence: "stat-confidence",
+  planViewer: "plan-viewer",
+  editModeToggle: "edit-mode-toggle",
+  toolAddWall: "tool-add-wall",
+  toolAddDoor: "tool-add-door",
+  toolAddWindow: "tool-add-window",
+  toolDelete: "tool-delete",
+  downloadReport: "download-report",
+  detailPanel: "detail-panel",
+  saveEditsBtn: "save-edits-btn",
+  layerWalls: "layer-toggle-walls",
+  layerDoors: "layer-toggle-doors",
+  layerWindows: "layer-toggle-windows",
+  layerRooms: "layer-toggle-rooms",
+  zoomIn: "viewer-zoom-in",
+  zoomOut: "viewer-zoom-out",
+  zoomReset: "viewer-zoom-reset",
+};
+
+export const HISTORY = {
+  page: "history-page",
+  row: (id) => `history-row-${id}`,
+  openBtn: (id) => `history-open-${id}`,
+};

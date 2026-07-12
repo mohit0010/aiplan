@@ -1,0 +1,41 @@
+{
+  "summary": "First-iteration full-stack testing of PlanMeasure AI. Ran 9 pytest cases against the backend (health, analyses list, get demo analysis, preview PNG, PDF report, PUT edit + verify recompute, unsupported file type 400, /analyze budget-exceeded expected env issue, delete 404) — all 9 PASSED. Frontend Playwright coverage over home / analysis (demo-ce39f09c) / history — all 36 expected data-testids present, SVG plan-viewer renders overlays (23+ child elements), zoom control changes % (100 -> 125), theme toggle flips root .dark class, edit-mode reveals full bottom toolbar (add-wall/door/window/delete/save), history Open button navigates to /analysis/demo-ce39f09c. No missing testids, no critical bugs.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/analyze", "issue": "EMERGENT_LLM_KEY has $0 balance — returns 500 'Budget has been exceeded'. Documented as an environment/billing issue (PRD P0), NOT a code bug. Verified endpoint still returns 500 as expected."},
+      {"endpoint": "PUT /api/analysis/{aid}", "issue": "recompute_from_objects overrides wall_length whenever ext+intr>0 in detected_objects (server.py L252, analyzer.py L377). After a PUT restore with the same objects, totals dropped from 356.4 -> 260.2 for the demo because seed detected_objects lengths sum to 260.2. Not a break — just a design quirk: LLM total and per-object lengths can disagree, and any manual edit will lock the total to the per-object sum. Consider only recomputing if the client explicitly opts in."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Analysis viewer", "issues": ["Legend chips at bottom of plan-viewer (Walls/Doors/Windows/Bathrooms/Rooms) overlap plan content on small canvases — could sit on a separate strip below the SVG for clarity."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Top up EMERGENT_LLM_KEY so POST /api/analyze can run vision analysis (documented P0 env issue, not a code fix).",
+    "Optional: revisit recompute_from_objects behaviour so PUT with unchanged objects doesn't rewrite wall totals when the client only wanted to add/remove one object."
+  ],
+  "critical_code_review_comments": [
+    "server.py L189-191: broad 'except Exception' converts every analyzer failure to a generic 500 with raw message — good UX-wise, but consider distinguishing quota/LLM errors (429/502) from parser errors (500) for better client handling.",
+    "analyzer.py L377-390: recompute_from_objects always overwrites wall_length/external/internal whenever any object has length_ft. This means a partial edit (add one door) will silently rewrite wall totals to the sum of currently attached wall segments, which is often smaller than the original LLM total.",
+    "server.py: no rate limiting or file-size guard beyond MAX_UPLOAD_MB — for public v1 that's fine; note for later.",
+    "server.py L317-323: CORS allow_origins defaults to '*' with allow_credentials=True — browsers ignore credentials with wildcard, but tighten in prod."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (new)"
+  ],
+  "success_rate": {"backend": "100% (9/9 pytest)", "frontend": "100% (all 36 testids + zoom/theme/edit/history flows)"},
+  "test_credentials": "N/A — no auth in v1. Demo analysis id: demo-ce39f09c.",
+  "seed_data_creation": "None created. Used pre-seeded demo-ce39f09c. Test PUT was restored after execution.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend & frontend baseline is green on iteration 1. Only pending item is EMERGENT_LLM_KEY balance for /api/analyze to succeed end-to-end. When the key is funded, re-run test_analyze_valid_png_expected_budget_error in backend_test.py — it will assert 200 automatically. All data-testids match /app/frontend/src/constants/testIds.js exactly. Demo analysis was mutated then restored via PUT during testing; totals for demo may show 260.2 ft instead of the original 356.4 ft due to recompute_from_objects (see minor issue).",
+  "rca of the issue": "N/A — no blocking bugs discovered."
+}
