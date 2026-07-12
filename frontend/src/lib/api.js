@@ -25,17 +25,24 @@ export async function getAnalysis(id) {
   return res.data;
 }
 
-export async function updateAnalysis(id, payload) {
-  const res = await api.put(`/analysis/${id}`, payload);
+export async function getPageAnalysis(id, pageIndex) {
+  const res = await api.get(`/analysis/${id}/pages/${pageIndex}`);
   return res.data;
 }
 
-export async function calibrateAnalysis(id, p1, p2, knownFt) {
+export async function updateAnalysis(id, payload, pageIndex = 0) {
+  const res = await api.put(`/analysis/${id}`, payload, {
+    params: { page: pageIndex },
+  });
+  return res.data;
+}
+
+export async function calibrateAnalysis(id, p1, p2, knownFt, pageIndex = 0) {
   const res = await api.post(`/analysis/${id}/calibrate`, {
     p1,
     p2,
     known_ft: knownFt,
-  });
+  }, { params: { page: pageIndex } });
   return res.data;
 }
 
@@ -49,7 +56,10 @@ export async function deleteAnalysis(id) {
   return res.data;
 }
 
-export function previewUrl(id) {
+export function previewUrl(id, pageIndex = null) {
+  if (pageIndex !== null && pageIndex !== undefined) {
+    return `${API_BASE}/analysis/${id}/pages/${pageIndex}/preview`;
+  }
   return `${API_BASE}/analysis/${id}/preview`;
 }
 

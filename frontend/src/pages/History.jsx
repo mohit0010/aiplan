@@ -99,7 +99,14 @@ const History = () => {
                       <div className="flex items-center gap-2">
                         <FileText className="w-4 h-4 text-primary" />
                         <div>
-                          <div className="font-medium text-sm">{it.filename}</div>
+                          <div className="font-medium text-sm flex items-center gap-1.5">
+                            {it.filename}
+                            {it.page_count > 1 && (
+                              <span className="text-[10px] font-mono-plex px-1.5 py-0.5 rounded bg-primary/10 text-primary">
+                                {it.page_count} pages
+                              </span>
+                            )}
+                          </div>
                           <div className="text-xs text-muted-foreground font-mono-plex">
                             {new Date(it.created_at).toLocaleString()}
                           </div>

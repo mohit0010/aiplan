@@ -97,6 +97,23 @@ def pdf_to_image(pdf_bytes: bytes, dpi: int = 200) -> bytes:
     return png_bytes
 
 
+MAX_PDF_PAGES = 8
+
+
+def pdf_all_pages_to_images(pdf_bytes: bytes, dpi: int = 200,
+                            max_pages: int = MAX_PDF_PAGES) -> List[bytes]:
+    """Convert up to `max_pages` PDF pages to PNG byte lists (in order)."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    out: List[bytes] = []
+    for i in range(min(doc.page_count, max_pages)):
+        page = doc.load_page(i)
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        out.append(pix.tobytes("png"))
+    doc.close()
+    return out
+
+
 def normalize_input_to_png(file_bytes: bytes, filename: str) -> bytes:
     """Accepts pdf/jpg/png bytes, returns PNG bytes suitable for analysis."""
     lower = filename.lower()
@@ -330,20 +347,90 @@ def build_building_data(llm_json: Dict[str, Any], img_w: int, img_h: int) -> Bui
 
 async def analyze_floor_plan(file_bytes: bytes, filename: str, session_id: str
                              ) -> Tuple[BuildingData, bytes]:
-    """
-    Full pipeline:
-      raw file bytes -> png preview -> CV hint -> LLM vision -> BuildingData
-    Returns (building_data, preview_png_bytes).
-    """
+    """Legacy single-page pipeline (kept for backwards compat)."""
     png = normalize_input_to_png(file_bytes, filename)
-    # Get image dimensions
     img = Image.open(io.BytesIO(png))
     w, h = img.size
-
     cv_hint = cv_wall_stats(png)
     llm_json = await llm_analyze(png, session_id, cv_hint)
     bd = build_building_data(llm_json, w, h)
     return bd, png
+
+
+async def analyze_document(file_bytes: bytes, filename: str, session_id: str
+                           ) -> List[Tuple[BuildingData, bytes]]:
+    """
+    Multi-page pipeline. For PDFs, analyzes every page (up to MAX_PDF_PAGES).
+    For PNG/JPG, returns a single-item list.
+    Returns list of (BuildingData, preview_png_bytes) — one per page in order.
+    """
+    lower = filename.lower()
+    if lower.endswith(".pdf"):
+        pngs = pdf_all_pages_to_images(file_bytes)
+        if not pngs:
+            raise ValueError("PDF has no readable pages")
+    else:
+        pngs = [normalize_input_to_png(file_bytes, filename)]
+
+    out: List[Tuple[BuildingData, bytes]] = []
+    for i, png in enumerate(pngs):
+        img = Image.open(io.BytesIO(png))
+        w, h = img.size
+        cv_hint = cv_wall_stats(png)
+        llm_json = await llm_analyze(png, f"{session_id}_p{i}", cv_hint)
+        bd = build_building_data(llm_json, w, h)
+        out.append((bd, png))
+    return out
+
+
+def aggregate_building_data(bds: List[BuildingData]) -> BuildingData:
+    """
+    Combine per-page BuildingData into an aggregate view.
+    Sums counts + wall lengths, weight-averages confidence, unions room_list
+    with a `page` prefix, marks approximate=true if any page is approximate.
+    """
+    if not bds:
+        return BuildingData()
+    if len(bds) == 1:
+        return bds[0]
+
+    total = sum(b.wall_length for b in bds)
+    ext = sum(b.external_wall for b in bds)
+    intr = sum(b.internal_wall for b in bds)
+    agg = BuildingData(
+        wall_length=round(total, 1),
+        external_wall=round(ext, 1),
+        internal_wall=round(intr, 1),
+        wall_length_m=round(total * FT_TO_M, 2),
+        external_wall_m=round(ext * FT_TO_M, 2),
+        internal_wall_m=round(intr * FT_TO_M, 2),
+        rooms=sum(b.rooms for b in bds),
+        bathrooms=sum(b.bathrooms for b in bds),
+        doors=sum(b.doors for b in bds),
+        windows=sum(b.windows for b in bds),
+        confidence=round(sum(b.confidence for b in bds) / len(bds), 1),
+        scale_detected=all(b.scale_detected for b in bds),
+        scale_note="Aggregated across pages",
+        approximate=any(b.approximate for b in bds),
+    )
+    areas = [b.built_up_area_sqft for b in bds if b.built_up_area_sqft]
+    if areas:
+        agg.built_up_area_sqft = round(sum(areas), 1)
+        agg.built_up_area_sqm = round(agg.built_up_area_sqft * 0.092903, 2)
+
+    rooms_flat: List[Dict[str, Any]] = []
+    for i, b in enumerate(bds):
+        for r in b.room_list:
+            r2 = dict(r)
+            r2["page"] = i + 1
+            rooms_flat.append(r2)
+    agg.room_list = rooms_flat
+    # detected_objects intentionally empty at aggregate level — they live
+    # per-page and are fetched via /pages/{n}
+    agg.detected_objects = []
+    agg.preview_width = bds[0].preview_width
+    agg.preview_height = bds[0].preview_height
+    return agg
 
 
 # Recompute helper (used by manual-correction endpoint so future modules

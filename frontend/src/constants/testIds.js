@@ -43,6 +43,8 @@ export const ANALYSIS = {
   calibrateDialogInput: "calibrate-length-input",
   calibrateDialogConfirm: "calibrate-confirm-btn",
   calibrateDialogCancel: "calibrate-cancel-btn",
+  pageTab: (i) => `page-tab-${i}`,
+  pageSelector: "page-selector",
 };
 
 export const HISTORY = {

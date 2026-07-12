@@ -53,8 +53,15 @@ def _stat_table(rows: List[List[str]]):
     return tbl
 
 
-def build_report_pdf(bd: Dict[str, Any], preview_png: bytes | None, filename: str = "plan") -> bytes:
-    """Return PDF bytes for a completed BuildingData analysis dict."""
+def build_report_pdf(bd: Dict[str, Any], preview_png: bytes | None,
+                     filename: str = "plan",
+                     pages: list | None = None) -> bytes:
+    """Return PDF bytes for a completed BuildingData analysis dict.
+
+    If `pages` is given, it is a list of (page_index, page_data_dict, preview_png|None)
+    tuples. In that case the aggregate summary is rendered first, followed by one
+    section per page. If omitted, the report renders the single top-level `bd`.
+    """
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
@@ -71,16 +78,23 @@ def build_report_pdf(bd: Dict[str, Any], preview_png: bytes | None, filename: st
     story.append(Spacer(1, 6 * mm))
 
     # Project meta
-    story.append(Paragraph(f"<b>Source:</b> {filename}", s["BodyBrand"]))
+    total_pages = len(pages) if pages and len(pages) > 1 else 1
+    story.append(Paragraph(f"<b>Source:</b> {filename} · {total_pages} page(s)",
+                           s["BodyBrand"]))
     conf = bd.get("confidence", 0)
     approx = "Approximate" if bd.get("approximate") else "Measured"
-    scale_note = bd.get("scale_note") or ("Scale detected" if bd.get("scale_detected") else "No scale detected — measurements approximate")
-    story.append(Paragraph(f"<b>Confidence:</b> {int(conf)}%  &nbsp;&nbsp; "
-                           f"<b>Mode:</b> {approx}  &nbsp;&nbsp; "
-                           f"<b>Notes:</b> {scale_note}", s["MutedSmall"]))
+    scale_note = bd.get("scale_note") or (
+        "Scale detected" if bd.get("scale_detected")
+        else "No scale detected — measurements approximate"
+    )
+    story.append(Paragraph(
+        f"<b>Confidence:</b> {int(conf)}%  &nbsp;&nbsp; "
+        f"<b>Mode:</b> {approx}  &nbsp;&nbsp; "
+        f"<b>Notes:</b> {scale_note}", s["MutedSmall"]
+    ))
     story.append(Spacer(1, 6 * mm))
 
-    # Preview image
+    # Aggregate preview (or single-page preview)
     if preview_png:
         try:
             img = RLImage(io.BytesIO(preview_png))
@@ -94,8 +108,9 @@ def build_report_pdf(bd: Dict[str, Any], preview_png: bytes | None, filename: st
         except Exception:
             pass
 
-    # Summary
-    story.append(Paragraph("Building Summary", s["H2Brand"]))
+    # Aggregate summary
+    title = "Aggregate Building Summary" if (pages and len(pages) > 1) else "Building Summary"
+    story.append(Paragraph(title, s["H2Brand"]))
     story.append(_stat_table([
         ["Metric", "Value", "Unit"],
         ["Total Wall Length", f"{bd.get('wall_length', 0):.1f}", "ft"],
@@ -116,15 +131,16 @@ def build_report_pdf(bd: Dict[str, Any], preview_png: bytes | None, filename: st
     room_list = bd.get("room_list") or []
     if room_list:
         story.append(Paragraph("Detected Rooms", s["H2Brand"]))
-        rows = [["#", "Room", "Type", "Area (sq ft)"]]
+        rows = [["#", "Room", "Type", "Page", "Area (sq ft)"]]
         for i, r in enumerate(room_list, 1):
             rows.append([
                 str(i),
                 str(r.get("name", "-")),
                 "Bathroom" if r.get("is_bathroom") else "Room",
+                str(r.get("page") or "1"),
                 (f"{r.get('area_sqft'):.0f}" if r.get("area_sqft") else "—"),
             ])
-        t = Table(rows, colWidths=[15 * mm, 80 * mm, 35 * mm, 40 * mm])
+        t = Table(rows, colWidths=[10 * mm, 75 * mm, 30 * mm, 20 * mm, 35 * mm])
         t.setStyle(TableStyle([
             ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F9FAFB")),
@@ -138,8 +154,40 @@ def build_report_pdf(bd: Dict[str, Any], preview_png: bytes | None, filename: st
         story.append(t)
         story.append(Spacer(1, 6 * mm))
 
+    # Per-page breakdown
+    if pages and len(pages) > 1:
+        story.append(PageBreak())
+        story.append(Paragraph("Per-Page Breakdown", s["H1Brand"]))
+        story.append(Spacer(1, 4 * mm))
+        for (idx, pdata, ppng) in pages:
+            story.append(Paragraph(f"Page {idx + 1}", s["H2Brand"]))
+            if ppng:
+                try:
+                    pimg = RLImage(io.BytesIO(ppng))
+                    max_w = 170 * mm
+                    iw, ih = pimg.wrap(0, 0)
+                    if iw > max_w:
+                        ratio = max_w / iw
+                        pimg._restrictSize(max_w, ih * ratio)
+                    story.append(pimg)
+                    story.append(Spacer(1, 4 * mm))
+                except Exception:
+                    pass
+            story.append(_stat_table([
+                ["Metric", "Value", "Unit"],
+                ["Wall Length", f"{pdata.get('wall_length', 0):.1f}", "ft"],
+                ["External", f"{pdata.get('external_wall', 0):.1f}", "ft"],
+                ["Internal", f"{pdata.get('internal_wall', 0):.1f}", "ft"],
+                ["Rooms", str(pdata.get("rooms", 0)), "count"],
+                ["Bathrooms", str(pdata.get("bathrooms", 0)), "count"],
+                ["Doors", str(pdata.get("doors", 0)), "count"],
+                ["Windows", str(pdata.get("windows", 0)), "count"],
+                ["Confidence", f"{int(pdata.get('confidence', 0))}", "%"],
+            ]))
+            story.append(Spacer(1, 8 * mm))
+
     # Footer
-    story.append(Spacer(1, 12 * mm))
+    story.append(Spacer(1, 8 * mm))
     story.append(Paragraph(
         "This report was generated automatically by PlanMeasure AI. "
         "Values marked approximate should be verified on site before construction decisions.",

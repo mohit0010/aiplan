@@ -35,6 +35,7 @@ import { toast } from "sonner";
 import {
   calibrateAnalysis,
   getAnalysis,
+  getPageAnalysis,
   previewUrl,
   reportUrl,
   updateAnalysis,
@@ -44,8 +45,11 @@ import { ANALYSIS } from "../constants/testIds";
 const AnalysisPage = () => {
   const { id } = useParams();
   const nav = useNavigate();
-  const [data, setData] = useState(null);
+  const [aggregate, setAggregate] = useState(null); // top-level summary + pages meta
+  const [data, setData] = useState(null);            // currently-displayed page (or single)
+  const [pageIndex, setPageIndex] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [pageLoading, setPageLoading] = useState(false);
   const [error, setError] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [editMode, setEditMode] = useState(false);
@@ -56,15 +60,29 @@ const AnalysisPage = () => {
   const [knownFt, setKnownFt] = useState("");
   const [calibrating, setCalibrating] = useState(false);
 
+  const pageCount = aggregate?.page_count || 1;
+  const isMultipage = pageCount > 1;
+
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         setLoading(true);
-        const d = await getAnalysis(id);
+        const agg = await getAnalysis(id);
         if (!alive) return;
-        setData(d);
-        setObjects(d.detected_objects || []);
+        setAggregate(agg);
+        if ((agg.page_count || 1) > 1) {
+          // multi-page: load page 0 details
+          const p = await getPageAnalysis(id, 0);
+          if (!alive) return;
+          setData(p);
+          setObjects(p.detected_objects || []);
+          setPageIndex(0);
+        } else {
+          setData(agg);
+          setObjects(agg.detected_objects || []);
+          setPageIndex(0);
+        }
       } catch (e) {
         setError(e?.response?.data?.detail || e.message);
       } finally {
@@ -75,6 +93,31 @@ const AnalysisPage = () => {
       alive = false;
     };
   }, [id]);
+
+  const switchPage = async (i) => {
+    if (i === pageIndex) return;
+    try {
+      setPageLoading(true);
+      setSelectedId(null);
+      const p = await getPageAnalysis(id, i);
+      setData(p);
+      setObjects(p.detected_objects || []);
+      setPageIndex(i);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || e.message);
+    } finally {
+      setPageLoading(false);
+    }
+  };
+
+  const refreshAggregate = async () => {
+    try {
+      const agg = await getAnalysis(id);
+      setAggregate(agg);
+    } catch (_) {
+      // silent
+    }
+  };
 
   const selected = useMemo(
     () => objects.find((o) => o.id === selectedId) || null,
@@ -120,9 +163,14 @@ const AnalysisPage = () => {
   const handleSave = async () => {
     try {
       setSaving(true);
-      const updated = await updateAnalysis(id, { detected_objects: objects });
+      const updated = await updateAnalysis(
+        id,
+        { detected_objects: objects },
+        pageIndex
+      );
       setData(updated);
       setObjects(updated.detected_objects || []);
+      await refreshAggregate();
       toast.success("Analysis updated");
       setEditMode(false);
       setSelectedId(null);
@@ -154,10 +202,12 @@ const AnalysisPage = () => {
         id,
         pendingCalib.p1,
         pendingCalib.p2,
-        val
+        val,
+        pageIndex
       );
       setData(updated);
       setObjects(updated.detected_objects || []);
+      await refreshAggregate();
       toast.success("Scale calibrated — measurements updated");
       setPendingCalib(null);
       setCalibMode(false);
@@ -203,9 +253,14 @@ const AnalysisPage = () => {
     );
   }
 
-  const previewSrc = data.preview_image
-    ? `${process.env.REACT_APP_BACKEND_URL}${data.preview_image}`
-    : previewUrl(id);
+  const previewSrc = isMultipage
+    ? previewUrl(id, pageIndex)
+    : (data.preview_image
+        ? `${process.env.REACT_APP_BACKEND_URL}${data.preview_image}`
+        : previewUrl(id));
+
+  // `summary` = aggregate totals (for stat cards); `data` = current page detail
+  const summary = isMultipage ? aggregate : data;
 
   return (
     <div className="min-h-screen bg-background" data-testid={ANALYSIS.page}>
@@ -310,6 +365,38 @@ const AnalysisPage = () => {
       {/* Main content: viewer + details */}
       <div className="max-w-[1440px] mx-auto px-6 pb-24 grid grid-cols-1 xl:grid-cols-12 gap-6">
         <div className="xl:col-span-9 space-y-6">
+          {isMultipage && (
+            <div
+              data-testid={ANALYSIS.pageSelector}
+              className="flex items-center gap-2 flex-wrap rounded-lg border border-border bg-card p-2"
+            >
+              <div className="overline pl-1 pr-2">Pages · {pageCount}</div>
+              {(aggregate?.pages || []).map((p) => (
+                <button
+                  key={p.page_index}
+                  data-testid={ANALYSIS.pageTab(p.page_index)}
+                  onClick={() => switchPage(p.page_index)}
+                  disabled={pageLoading}
+                  className={`h-8 px-3 rounded-md text-xs font-mono-plex transition-colors inline-flex items-center gap-2 ${
+                    p.page_index === pageIndex
+                      ? "bg-primary text-primary-foreground"
+                      : "hover:bg-secondary text-muted-foreground"
+                  }`}
+                >
+                  <span>P{p.page_index + 1}</span>
+                  <span className="opacity-60">
+                    {Number(p.wall_length).toFixed(0)} ft
+                  </span>
+                </button>
+              ))}
+              {pageLoading && (
+                <span className="text-xs text-muted-foreground inline-flex items-center gap-1 pl-2">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Loading page…
+                </span>
+              )}
+            </div>
+          )}
+
           <PlanViewer
             image={previewSrc}
             width={data.preview_width}
@@ -323,55 +410,62 @@ const AnalysisPage = () => {
             onCalibrate={handleCalibrateSegment}
           />
 
-          {/* Stat cards */}
+          {/* Stat cards — show aggregate totals when multi-page */}
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.35 }}
             className="grid grid-cols-2 md:grid-cols-4 gap-3"
           >
+            {isMultipage && (
+              <div className="col-span-2 md:col-span-4 -mb-1">
+                <div className="overline">
+                  Building totals · {pageCount} pages
+                </div>
+              </div>
+            )}
             <StatCard
               testid={ANALYSIS.statTotalWall}
               label="Total wall length"
-              value={data.wall_length?.toFixed(1)}
+              value={summary.wall_length?.toFixed(1)}
               unit="ft"
-              sub={`${data.wall_length_m?.toFixed(2)} m`}
+              sub={`${summary.wall_length_m?.toFixed(2)} m`}
               icon={Ruler}
             />
             <StatCard
               testid={ANALYSIS.statExternalWall}
               label="External walls"
-              value={data.external_wall?.toFixed(1)}
+              value={summary.external_wall?.toFixed(1)}
               unit="ft"
-              sub={`${data.external_wall_m?.toFixed(2)} m`}
+              sub={`${summary.external_wall_m?.toFixed(2)} m`}
               icon={Grid2x2}
             />
             <StatCard
               testid={ANALYSIS.statInternalWall}
               label="Internal walls"
-              value={data.internal_wall?.toFixed(1)}
+              value={summary.internal_wall?.toFixed(1)}
               unit="ft"
-              sub={`${data.internal_wall_m?.toFixed(2)} m`}
+              sub={`${summary.internal_wall_m?.toFixed(2)} m`}
               icon={Grid2x2}
             />
             <StatCard
               testid={ANALYSIS.statConfidence}
               label="AI confidence"
-              value={Math.round(data.confidence || 0)}
+              value={Math.round(summary.confidence || 0)}
               unit="%"
-              sub={data.approximate ? "Approximate" : "Measured"}
+              sub={summary.approximate ? "Approximate" : "Measured"}
               icon={Sparkle}
             />
             <StatCard
               testid={ANALYSIS.statRooms}
               label="Rooms"
-              value={data.rooms}
+              value={summary.rooms}
               icon={HomeIcon}
             />
             <StatCard
               testid={ANALYSIS.statBathrooms}
               label="Bathrooms"
-              value={data.bathrooms}
+              value={summary.bathrooms}
               icon={Bath}
             />
             <StatCard
@@ -386,15 +480,15 @@ const AnalysisPage = () => {
               value={data.windows}
               icon={Square}
             />
-            {data.built_up_area_sqft ? (
+            {summary.built_up_area_sqft ? (
               <StatCard
                 testid={ANALYSIS.statArea}
                 label="Built-up area"
-                value={Math.round(data.built_up_area_sqft).toLocaleString()}
+                value={Math.round(summary.built_up_area_sqft).toLocaleString()}
                 unit="ft²"
                 sub={
-                  data.built_up_area_sqm
-                    ? `${data.built_up_area_sqm.toFixed(1)} m²`
+                  summary.built_up_area_sqm
+                    ? `${summary.built_up_area_sqm.toFixed(1)} m²`
                     : ""
                 }
                 icon={Grid2x2}

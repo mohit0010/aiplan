@@ -8,7 +8,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
@@ -20,6 +20,8 @@ from starlette.middleware.cors import CORSMiddleware
 from analyzer import (
     BuildingData,
     DetectedObject,
+    aggregate_building_data,
+    analyze_document,
     analyze_floor_plan,
     calibrate_scale,
     recompute_from_objects,
@@ -67,6 +69,7 @@ class AnalysisSummary(BaseModel):
     windows: int
     confidence: float
     approximate: bool
+    page_count: int = 1
 
 
 class ObjectUpdate(BaseModel):
@@ -101,12 +104,37 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _bd_to_response(bd: BuildingData, doc: Dict[str, Any]) -> Dict[str, Any]:
-    """Build API response for /analyze and /analysis/{id}."""
+def _bd_to_response(bd: BuildingData, doc: Dict[str, Any],
+                    page_index: Optional[int] = None) -> Dict[str, Any]:
+    """Build API response for /analyze and /analysis/{id}.
+    If page_index is provided, preview URL points at that page.
+    """
+    aid = doc["id"]
+    if page_index is not None:
+        preview = f"/api/analysis/{aid}/pages/{page_index}/preview"
+    else:
+        preview = f"/api/analysis/{aid}/preview"
+    pages_meta: List[Dict[str, Any]] = []
+    for p in doc.get("pages", []) or []:
+        pd = p.get("data", {})
+        pages_meta.append({
+            "page_index": p["page_index"],
+            "preview_image": f"/api/analysis/{aid}/pages/{p['page_index']}/preview",
+            "wall_length": pd.get("wall_length", 0),
+            "rooms": pd.get("rooms", 0),
+            "bathrooms": pd.get("bathrooms", 0),
+            "doors": pd.get("doors", 0),
+            "windows": pd.get("windows", 0),
+            "confidence": pd.get("confidence", 0),
+            "approximate": pd.get("approximate", True),
+        })
     return {
-        "id": doc["id"],
+        "id": aid,
         "filename": doc.get("filename", ""),
         "created_at": doc.get("created_at", ""),
+        "page_count": doc.get("page_count", 1),
+        "page_index": page_index,
+        "pages": pages_meta,
         "wall_length": bd.wall_length,
         "external_wall": bd.external_wall,
         "internal_wall": bd.internal_wall,
@@ -127,12 +155,11 @@ def _bd_to_response(bd: BuildingData, doc: Dict[str, Any]) -> Dict[str, Any]:
         "detected_objects": [o.__dict__ for o in bd.detected_objects],
         "preview_width": bd.preview_width,
         "preview_height": bd.preview_height,
-        "preview_image": f"/api/analysis/{doc['id']}/preview",
+        "preview_image": preview,
     }
 
 
-def _doc_to_bd(doc: Dict[str, Any]) -> BuildingData:
-    payload = doc.get("data", {})
+def _dict_to_bd(payload: Dict[str, Any]) -> BuildingData:
     bd = BuildingData(
         wall_length=payload.get("wall_length", 0),
         external_wall=payload.get("external_wall", 0),
@@ -158,6 +185,21 @@ def _doc_to_bd(doc: Dict[str, Any]) -> BuildingData:
         bd.detected_objects.append(DetectedObject(**{k: v for k, v in o.items()
                                                      if k in DetectedObject.__annotations__}))
     return bd
+
+
+def _doc_to_bd(doc: Dict[str, Any]) -> BuildingData:
+    return _dict_to_bd(doc.get("data", {}))
+
+
+def _reaggregate(doc: Dict[str, Any]) -> BuildingData:
+    """Recompute aggregate from per-page BDs and persist to doc['data']."""
+    pages = doc.get("pages") or []
+    if not pages:
+        return _doc_to_bd(doc)
+    bds = [_dict_to_bd(p.get("data", {})) for p in pages]
+    agg = aggregate_building_data(bds)
+    doc["data"] = agg.to_dict()
+    return agg
 
 
 # --------------------------------------------------------------------------
@@ -192,7 +234,7 @@ async def analyze(file: UploadFile = File(...)):
     logger.info("Analyzing %s (%d bytes) -> %s", file.filename, len(raw), analysis_id)
 
     try:
-        bd, preview_png = await analyze_floor_plan(raw, file.filename, session_id=analysis_id)
+        results = await analyze_document(raw, file.filename, session_id=analysis_id)
     except Exception as e:
         logger.exception("Analysis failed")
         msg = str(e)
@@ -210,25 +252,82 @@ async def analyze(file: UploadFile = File(...)):
             )
         raise HTTPException(500, f"Analysis failed: {msg}")
 
+    pages_docs: List[Dict[str, Any]] = []
+    for i, (bd, png) in enumerate(results):
+        pages_docs.append({
+            "page_index": i,
+            "preview_b64": base64.b64encode(png).decode("ascii"),
+            "data": bd.to_dict(),
+        })
+
+    aggregate = aggregate_building_data([bd for bd, _ in results])
+
     doc = {
         "id": analysis_id,
         "filename": file.filename,
         "created_at": _now_iso(),
-        "data": bd.to_dict(),
-        "preview_b64": base64.b64encode(preview_png).decode("ascii"),
+        "page_count": len(pages_docs),
+        "data": aggregate.to_dict(),
+        # first-page preview at top level for backward compat
+        "preview_b64": pages_docs[0]["preview_b64"],
+        "pages": pages_docs,
     }
     await analyses_col.insert_one(doc)
 
-    return _bd_to_response(bd, doc)
+    return _bd_to_response(aggregate, doc)
 
 
 @api.get("/analysis/{aid}")
 async def get_analysis(aid: str):
-    doc = await analyses_col.find_one({"id": aid}, {"_id": 0, "preview_b64": 0})
+    doc = await analyses_col.find_one(
+        {"id": aid},
+        # exclude heavy preview blobs; include only page data metadata
+        {"_id": 0, "preview_b64": 0, "pages.preview_b64": 0},
+    )
     if not doc:
         raise HTTPException(404, "Analysis not found")
     bd = _doc_to_bd(doc)
     return _bd_to_response(bd, doc)
+
+
+@api.get("/analysis/{aid}/pages/{n}")
+async def get_page_analysis(aid: str, n: int):
+    doc = await analyses_col.find_one(
+        {"id": aid},
+        {"_id": 0, "preview_b64": 0, "pages.preview_b64": 0},
+    )
+    if not doc:
+        raise HTTPException(404, "Analysis not found")
+    pages = doc.get("pages") or []
+    if not pages:
+        # legacy single-page document — page 0 is the whole thing
+        if n == 0:
+            return _bd_to_response(_doc_to_bd(doc), doc, page_index=0)
+        raise HTTPException(404, "Page not found")
+    if n < 0 or n >= len(pages):
+        raise HTTPException(404, "Page not found")
+    bd = _dict_to_bd(pages[n].get("data", {}))
+    return _bd_to_response(bd, doc, page_index=n)
+
+
+@api.get("/analysis/{aid}/pages/{n}/preview")
+async def get_page_preview(aid: str, n: int):
+    doc = await analyses_col.find_one({"id": aid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Analysis not found")
+    pages = doc.get("pages") or []
+    if pages:
+        if n < 0 or n >= len(pages):
+            raise HTTPException(404, "Page not found")
+        b64 = pages[n].get("preview_b64", "")
+    else:
+        if n != 0:
+            raise HTTPException(404, "Page not found")
+        b64 = doc.get("preview_b64", "")
+    if not b64:
+        raise HTTPException(404, "Preview missing")
+    return Response(content=base64.b64decode(b64), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @api.get("/analysis/{aid}/preview")
@@ -245,14 +344,24 @@ async def get_preview(aid: str):
 
 
 @api.put("/analysis/{aid}")
-async def update_analysis(aid: str, body: AnalysisUpdate):
-    """Apply manual corrections (edit mode). Recomputes counts + wall lengths."""
-    doc = await analyses_col.find_one({"id": aid}, {"_id": 0})
+async def update_analysis(aid: str, body: AnalysisUpdate, page: int = 0):
+    """Apply manual corrections (edit mode) to a specific page (default 0).
+    Recomputes counts + wall lengths for that page and re-aggregates.
+    """
+    doc = await analyses_col.find_one({"id": aid}, {"_id": 0, "preview_b64": 0,
+                                                     "pages.preview_b64": 0})
     if not doc:
         raise HTTPException(404, "Analysis not found")
 
-    bd = _doc_to_bd(doc)
-    # Replace detected_objects with the edited set
+    pages = doc.get("pages") or []
+    target_bd: BuildingData
+    if pages:
+        if page < 0 or page >= len(pages):
+            raise HTTPException(404, "Page not found")
+        target_bd = _dict_to_bd(pages[page].get("data", {}))
+    else:
+        target_bd = _doc_to_bd(doc)
+
     new_objs: List[DetectedObject] = []
     for i, o in enumerate(body.detected_objects):
         new_objs.append(DetectedObject(
@@ -265,18 +374,29 @@ async def update_analysis(aid: str, body: AnalysisUpdate):
             length_ft=o.length_ft,
             confidence=o.confidence,
         ))
-    bd.detected_objects = new_objs
+    target_bd.detected_objects = new_objs
     if body.room_list is not None:
-        bd.room_list = body.room_list
+        target_bd.room_list = body.room_list
 
-    bd = recompute_from_objects(bd)
+    target_bd = recompute_from_objects(target_bd)
 
+    if pages:
+        pages[page]["data"] = target_bd.to_dict()
+        doc["pages"] = pages
+        agg = _reaggregate(doc)
+        await analyses_col.update_one(
+            {"id": aid},
+            {"$set": {"pages": pages, "data": agg.to_dict(),
+                      "updated_at": _now_iso()}},
+        )
+        return _bd_to_response(target_bd, doc, page_index=page)
+    # Legacy single-page path
     await analyses_col.update_one(
         {"id": aid},
-        {"$set": {"data": bd.to_dict(), "updated_at": _now_iso()}},
+        {"$set": {"data": target_bd.to_dict(), "updated_at": _now_iso()}},
     )
-    doc["data"] = bd.to_dict()
-    return _bd_to_response(bd, doc)
+    doc["data"] = target_bd.to_dict()
+    return _bd_to_response(target_bd, doc)
 
 
 @api.get("/analyses", response_model=List[AnalysisSummary])
@@ -296,6 +416,7 @@ async def list_analyses():
             windows=data.get("windows", 0),
             confidence=data.get("confidence", 0),
             approximate=data.get("approximate", True),
+            page_count=d.get("page_count", 1),
         ))
     return out
 
@@ -309,21 +430,41 @@ async def delete_analysis(aid: str):
 
 
 @api.post("/analysis/{aid}/calibrate")
-async def calibrate(aid: str, body: CalibrationRequest):
-    """Apply a user-drawn scale calibration and rescale all measurements."""
-    doc = await analyses_col.find_one({"id": aid}, {"_id": 0})
+async def calibrate(aid: str, body: CalibrationRequest, page: int = 0):
+    """Apply a user-drawn scale calibration to a specific page (default 0)."""
+    doc = await analyses_col.find_one({"id": aid}, {"_id": 0, "preview_b64": 0,
+                                                     "pages.preview_b64": 0})
     if not doc:
         raise HTTPException(404, "Analysis not found")
-    bd = _doc_to_bd(doc)
+
+    pages = doc.get("pages") or []
+    if pages:
+        if page < 0 or page >= len(pages):
+            raise HTTPException(404, "Page not found")
+        bd = _dict_to_bd(pages[page].get("data", {}))
+    else:
+        bd = _doc_to_bd(doc)
+
     if bd.preview_width <= 0 or bd.preview_height <= 0:
         raise HTTPException(400, "Preview dimensions missing")
-    # Guard degenerate segments
     dx = (body.p2[0] - body.p1[0]) * bd.preview_width
     dy = (body.p2[1] - body.p1[1]) * bd.preview_height
     if (dx * dx + dy * dy) < 4.0:
         raise HTTPException(400, "Segment too short — draw a longer reference segment.")
+
     bd = calibrate_scale(bd, body.p1, body.p2, body.known_ft)
     bd = recompute_from_objects(bd)
+
+    if pages:
+        pages[page]["data"] = bd.to_dict()
+        doc["pages"] = pages
+        agg = _reaggregate(doc)
+        await analyses_col.update_one(
+            {"id": aid},
+            {"$set": {"pages": pages, "data": agg.to_dict(),
+                      "updated_at": _now_iso()}},
+        )
+        return _bd_to_response(bd, doc, page_index=page)
     await analyses_col.update_one(
         {"id": aid},
         {"$set": {"data": bd.to_dict(), "updated_at": _now_iso()}},
@@ -337,13 +478,36 @@ async def download_report(aid: str):
     doc = await analyses_col.find_one({"id": aid}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Analysis not found")
-    preview_png = None
-    if doc.get("preview_b64"):
-        try:
-            preview_png = base64.b64decode(doc["preview_b64"])
-        except Exception:
-            preview_png = None
-    pdf = build_report_pdf(doc.get("data", {}), preview_png, doc.get("filename", "plan"))
+
+    # Build list of (page_index, data_dict, preview_png_bytes|None)
+    pages_payload: List[Tuple[int, Dict[str, Any], Optional[bytes]]] = []
+    doc_pages = doc.get("pages") or []
+    if doc_pages:
+        for p in doc_pages:
+            png = None
+            b64 = p.get("preview_b64", "")
+            if b64:
+                try:
+                    png = base64.b64decode(b64)
+                except Exception:
+                    png = None
+            pages_payload.append((p["page_index"], p.get("data", {}), png))
+    else:
+        png = None
+        b64 = doc.get("preview_b64", "")
+        if b64:
+            try:
+                png = base64.b64decode(b64)
+            except Exception:
+                png = None
+        pages_payload.append((0, doc.get("data", {}), png))
+
+    pdf = build_report_pdf(
+        doc.get("data", {}),
+        pages_payload[0][2],
+        doc.get("filename", "plan"),
+        pages=pages_payload,
+    )
     safe_name = os.path.splitext(doc.get("filename", "plan"))[0]
     return StreamingResponse(
         io.BytesIO(pdf),
