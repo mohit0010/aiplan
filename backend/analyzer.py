@@ -348,6 +348,71 @@ async def analyze_floor_plan(file_bytes: bytes, filename: str, session_id: str
 
 # Recompute helper (used by manual-correction endpoint so future modules
 # like BOQ / Paint / Brick can trigger recompute after edits)
+def calibrate_scale(bd: BuildingData, p1: List[float], p2: List[float], known_ft: float) -> BuildingData:
+    """
+    Apply user-supplied scale calibration.
+    p1, p2 are normalized coords [x,y] in 0..1 relative to preview.
+    known_ft is the real-world length of the drawn segment in feet.
+    Rescales every wall polyline (length_ft) and every door/window (width_ft),
+    plus built-up area from any room bboxes.
+    """
+    if known_ft <= 0 or bd.preview_width <= 0 or bd.preview_height <= 0:
+        return bd
+    dx_px = (p2[0] - p1[0]) * bd.preview_width
+    dy_px = (p2[1] - p1[1]) * bd.preview_height
+    seg_px = (dx_px * dx_px + dy_px * dy_px) ** 0.5
+    if seg_px <= 0:
+        return bd
+    ft_per_px = known_ft / seg_px
+
+    ext = 0.0
+    intr = 0.0
+    for o in bd.detected_objects:
+        t = o.type
+        if t in ("wall_external", "wall_internal") and o.points and len(o.points) >= 2:
+            total = 0.0
+            for i in range(1, len(o.points)):
+                a, b = o.points[i - 1], o.points[i]
+                px = (b[0] - a[0]) * bd.preview_width
+                py = (b[1] - a[1]) * bd.preview_height
+                total += (px * px + py * py) ** 0.5
+            o.length_ft = round(total * ft_per_px, 1)
+            if t == "wall_external":
+                ext += o.length_ft
+            else:
+                intr += o.length_ft
+        elif t == "door":
+            side = max(o.w * bd.preview_width, o.h * bd.preview_height)
+            o.width_ft = round(side * ft_per_px, 1)
+        elif t == "window":
+            side = max(o.w * bd.preview_width, o.h * bd.preview_height)
+            o.width_ft = round(side * ft_per_px, 1)
+
+    bd.external_wall = round(ext, 1)
+    bd.internal_wall = round(intr, 1)
+    bd.wall_length = round(ext + intr, 1)
+    bd.external_wall_m = round(bd.external_wall * FT_TO_M, 2)
+    bd.internal_wall_m = round(bd.internal_wall * FT_TO_M, 2)
+    bd.wall_length_m = round(bd.wall_length * FT_TO_M, 2)
+
+    # Built-up area: sum of rect areas of type room + bathroom in ft^2
+    total_area = 0.0
+    for o in bd.detected_objects:
+        if o.type in ("room", "bathroom") and o.w and o.h:
+            w_ft = (o.w * bd.preview_width) * ft_per_px
+            h_ft = (o.h * bd.preview_height) * ft_per_px
+            total_area += w_ft * h_ft
+    if total_area > 0:
+        bd.built_up_area_sqft = round(total_area, 1)
+        bd.built_up_area_sqm = round(total_area * 0.092903, 2)
+
+    bd.scale_detected = True
+    bd.scale_note = f"User calibrated · {ft_per_px:.4f} ft/px"
+    bd.approximate = False
+    bd.confidence = max(bd.confidence, 92.0)
+    return bd
+
+
 def recompute_from_objects(bd: BuildingData) -> BuildingData:
     """Recompute counts and wall lengths from detected_objects list."""
     ext = 0.0

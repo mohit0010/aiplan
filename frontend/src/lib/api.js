@@ -30,6 +30,15 @@ export async function updateAnalysis(id, payload) {
   return res.data;
 }
 
+export async function calibrateAnalysis(id, p1, p2, knownFt) {
+  const res = await api.post(`/analysis/${id}/calibrate`, {
+    p1,
+    p2,
+    known_ft: knownFt,
+  });
+  return res.data;
+}
+
 export async function listAnalyses() {
   const res = await api.get(`/analyses`);
   return res.data;

@@ -4,17 +4,10 @@ import { Button } from "./ui/button";
 import { ANALYSIS } from "../constants/testIds";
 
 /**
- * PlanViewer — renders an uploaded floor plan image with SVG object overlays.
- * Supports zoom, pan, hover tooltips, layer toggles.
- *
- * Props:
- *   image       string URL of preview image
- *   width       number pixel width of image (from analysis.preview_width)
- *   height      number pixel height (from analysis.preview_height)
- *   objects     array<{id,type,x,y,w,h,points,label,length_ft,width_ft,confidence}>
- *   onSelect    (obj) => void
- *   selectedId  string
- *   editMode    boolean — when true, clicking an object selects it (for deletion)
+ * PlanViewer — floor plan with SVG overlays, zoom/pan, layers, tooltips.
+ * Extended:
+ *   - editMode + onObjectChange(obj)  → drag body / drag corners / drag wall points
+ *   - calibrateMode + onCalibrate(p1,p2)  → click two points to define a scale segment
  */
 const LAYER_TYPES = {
   walls: ["wall_external", "wall_internal"],
@@ -31,11 +24,16 @@ const PlanViewer = ({
   onSelect,
   selectedId,
   editMode = false,
+  onObjectChange,
+  calibrateMode = false,
+  onCalibrate,
 }) => {
   const wrapRef = useRef(null);
+  const svgRef = useRef(null);
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [drag, setDrag] = useState(null);
+  const [panDrag, setPanDrag] = useState(null);
+  const [objDrag, setObjDrag] = useState(null);
   const [hover, setHover] = useState(null);
   const [layers, setLayers] = useState({
     walls: true,
@@ -43,15 +41,19 @@ const PlanViewer = ({
     windows: true,
     rooms: true,
   });
+  const [calibPts, setCalibPts] = useState([]);
+  const [mousePt, setMousePt] = useState(null); // normalized, for calibration preview
 
-  const visible = useMemo(() => {
-    return objects.filter((o) => {
-      for (const [layer, types] of Object.entries(LAYER_TYPES)) {
-        if (types.includes(o.type)) return layers[layer];
-      }
-      return true;
-    });
-  }, [objects, layers]);
+  const visible = useMemo(
+    () =>
+      objects.filter((o) => {
+        for (const [layer, types] of Object.entries(LAYER_TYPES)) {
+          if (types.includes(o.type)) return layers[layer];
+        }
+        return true;
+      }),
+    [objects, layers]
+  );
 
   const zoomIn = () => setZoom((z) => Math.min(4, +(z + 0.25).toFixed(2)));
   const zoomOut = () => setZoom((z) => Math.max(0.25, +(z - 0.25).toFixed(2)));
@@ -67,17 +69,6 @@ const PlanViewer = ({
     setZoom((z) => Math.max(0.25, Math.min(4, +(z + delta).toFixed(2))));
   };
 
-  const onMouseDown = (e) => {
-    if (e.button !== 0) return;
-    setDrag({ sx: e.clientX, sy: e.clientY, ox: offset.x, oy: offset.y });
-  };
-  const onMouseMove = (e) => {
-    if (drag) {
-      setOffset({ x: drag.ox + (e.clientX - drag.sx), y: drag.oy + (e.clientY - drag.sy) });
-    }
-  };
-  const onMouseUp = () => setDrag(null);
-
   useEffect(() => {
     const w = wrapRef.current;
     if (!w) return;
@@ -85,7 +76,15 @@ const PlanViewer = ({
     return () => w.removeEventListener("wheel", onWheel);
   }, []);
 
-  // Compute display size fitting to container width
+  // Reset calibration points when leaving mode
+  useEffect(() => {
+    if (!calibrateMode) {
+      setCalibPts([]);
+      setMousePt(null);
+    }
+  }, [calibrateMode]);
+
+  // Fit-to-container aspect calculation
   const [box, setBox] = useState({ w: 900, h: 600 });
   useEffect(() => {
     const el = wrapRef.current;
@@ -105,6 +104,127 @@ const PlanViewer = ({
   const svgW = box.w;
   const svgH = box.w / displayAspect;
 
+  // client → normalized
+  const clientToNorm = (clientX, clientY) => {
+    const el = svgRef.current;
+    if (!el) return [0, 0];
+    const r = el.getBoundingClientRect();
+    return [
+      Math.max(0, Math.min(1, (clientX - r.left) / r.width)),
+      Math.max(0, Math.min(1, (clientY - r.top) / r.height)),
+    ];
+  };
+  const clientDeltaToNorm = (dxPx, dyPx) => {
+    const el = svgRef.current;
+    if (!el) return [0, 0];
+    const r = el.getBoundingClientRect();
+    return [dxPx / r.width, dyPx / r.height];
+  };
+
+  // ------ Pan / global mouse handlers ------
+  const onCanvasMouseDown = (e) => {
+    if (e.button !== 0) return;
+    if (calibrateMode) {
+      const [nx, ny] = clientToNorm(e.clientX, e.clientY);
+      const next = [...calibPts, [nx, ny]];
+      setCalibPts(next);
+      if (next.length === 2 && onCalibrate) {
+        onCalibrate(next[0], next[1]);
+      }
+      return;
+    }
+    setPanDrag({
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: offset.x,
+      oy: offset.y,
+    });
+  };
+  const onCanvasMouseMove = (e) => {
+    if (objDrag) return handleObjMove(e);
+    if (calibrateMode && calibPts.length === 1) {
+      setMousePt(clientToNorm(e.clientX, e.clientY));
+      return;
+    }
+    if (panDrag) {
+      setOffset({
+        x: panDrag.ox + (e.clientX - panDrag.sx),
+        y: panDrag.oy + (e.clientY - panDrag.sy),
+      });
+    }
+  };
+  const onCanvasMouseUp = () => {
+    setPanDrag(null);
+    setObjDrag(null);
+  };
+  const onCanvasLeave = () => {
+    onCanvasMouseUp();
+    setHover(null);
+  };
+
+  // ------ Object drag handlers ------
+  const beginObjDrag = (e, obj, kind) => {
+    if (!editMode) return;
+    e.stopPropagation();
+    e.preventDefault();
+    onSelect && onSelect(obj);
+    setObjDrag({
+      objId: obj.id,
+      kind,
+      startX: e.clientX,
+      startY: e.clientY,
+      snap: JSON.parse(JSON.stringify(obj)),
+    });
+  };
+  const handleObjMove = (e) => {
+    const [dx, dy] = clientDeltaToNorm(
+      e.clientX - objDrag.startX,
+      e.clientY - objDrag.startY
+    );
+    const snap = objDrag.snap;
+    let next = null;
+    if (objDrag.kind === "move") {
+      if (snap.points && snap.points.length) {
+        next = {
+          ...snap,
+          x: snap.x + dx,
+          y: snap.y + dy,
+          points: snap.points.map((p) => [p[0] + dx, p[1] + dy]),
+        };
+      } else {
+        next = { ...snap, x: snap.x + dx, y: snap.y + dy };
+      }
+    } else if (objDrag.kind.startsWith("corner-")) {
+      const corner = objDrag.kind.slice("corner-".length);
+      let { x, y, w, h } = snap;
+      if (corner.includes("r")) w = snap.w + dx;
+      if (corner.includes("l")) {
+        x = snap.x + dx;
+        w = snap.w - dx;
+      }
+      if (corner.includes("b")) h = snap.h + dy;
+      if (corner.includes("t")) {
+        y = snap.y + dy;
+        h = snap.h - dy;
+      }
+      next = {
+        ...snap,
+        x,
+        y,
+        w: Math.max(0.005, w),
+        h: Math.max(0.005, h),
+      };
+    } else if (objDrag.kind.startsWith("point-")) {
+      const idx = parseInt(objDrag.kind.slice("point-".length), 10);
+      const newPts = snap.points.map((p, i) =>
+        i === idx ? [p[0] + dx, p[1] + dy] : p
+      );
+      next = { ...snap, points: newPts };
+    }
+    if (next && onObjectChange) onObjectChange(next);
+  };
+
+  // ------ Rendering ------
   const classFor = (t) => {
     switch (t) {
       case "wall_external": return "overlay-wall-external overlay-hit";
@@ -125,55 +245,93 @@ const PlanViewer = ({
       e.stopPropagation();
       onSelect && onSelect(o);
     };
-    const handleEnter = (e) => setHover({ obj: o, x: e.clientX, y: e.clientY });
+    const handleEnter = (e) =>
+      !calibrateMode && setHover({ obj: o, x: e.clientX, y: e.clientY });
     const handleLeave = () => setHover(null);
-    const strokeExtra = isSelected ? { strokeWidth: 4, filter: "drop-shadow(0 0 8px currentColor)" } : {};
+    const strokeExtra = isSelected
+      ? { strokeWidth: 4, filter: "drop-shadow(0 0 8px currentColor)" }
+      : {};
+    const bodyEvents = editMode
+      ? {
+          onMouseDown: (e) => beginObjDrag(e, o, "move"),
+          onClick: handleClick,
+          onMouseEnter: handleEnter,
+          onMouseLeave: handleLeave,
+          style: { ...strokeExtra, cursor: "move" },
+        }
+      : {
+          onClick: handleClick,
+          onMouseEnter: handleEnter,
+          onMouseLeave: handleLeave,
+          style: strokeExtra,
+        };
 
+    // wall polylines
     if (o.type === "wall_external" || o.type === "wall_internal") {
       if (o.points && o.points.length >= 2) {
         const d = o.points
           .map((p, i) => `${i === 0 ? "M" : "L"} ${px(p[0])} ${py(p[1])}`)
           .join(" ");
         return (
-          <path
-            key={o.id || idx}
-            d={d}
-            className={classFor(o.type)}
-            style={strokeExtra}
-            onClick={handleClick}
-            onMouseEnter={handleEnter}
-            onMouseLeave={handleLeave}
-            data-testid={`obj-${o.id}`}
-          />
+          <g key={o.id || idx}>
+            <path
+              d={d}
+              className={classFor(o.type)}
+              data-testid={`obj-${o.id}`}
+              {...bodyEvents}
+            />
+            {editMode && isSelected &&
+              o.points.map((p, i) => (
+                <PointHandle
+                  key={`pt-${i}`}
+                  cx={px(p[0])}
+                  cy={py(p[1])}
+                  onMouseDown={(e) => beginObjDrag(e, o, `point-${i}`)}
+                />
+              ))}
+          </g>
         );
       }
-      // fallback: use bbox as a line
       return (
         <line
           key={o.id || idx}
           x1={px(o.x)} y1={py(o.y)}
           x2={px(o.x + (o.w || 0.05))} y2={py(o.y + (o.h || 0))}
           className={classFor(o.type)}
-          style={strokeExtra}
-          onClick={handleClick}
-          onMouseEnter={handleEnter}
-          onMouseLeave={handleLeave}
+          {...bodyEvents}
         />
       );
     }
+    // rect objects
+    const rectX = px(o.x);
+    const rectY = py(o.y);
+    const rectW = Math.max(4, px(o.w));
+    const rectH = Math.max(4, py(o.h));
     return (
-      <rect
-        key={o.id || idx}
-        x={px(o.x)} y={py(o.y)}
-        width={Math.max(4, px(o.w))} height={Math.max(4, py(o.h))}
-        rx={o.type === "door" || o.type === "window" ? 2 : 4}
-        className={classFor(o.type)}
-        style={strokeExtra}
-        onClick={handleClick}
-        onMouseEnter={handleEnter}
-        onMouseLeave={handleLeave}
-        data-testid={`obj-${o.id}`}
-      />
+      <g key={o.id || idx}>
+        <rect
+          x={rectX}
+          y={rectY}
+          width={rectW}
+          height={rectH}
+          rx={o.type === "door" || o.type === "window" ? 2 : 4}
+          className={classFor(o.type)}
+          data-testid={`obj-${o.id}`}
+          {...bodyEvents}
+        />
+        {editMode && isSelected && (
+          <>
+            <CornerHandle cx={rectX} cy={rectY}
+              onMouseDown={(e) => beginObjDrag(e, o, "corner-tl")} />
+            <CornerHandle cx={rectX + rectW} cy={rectY}
+              onMouseDown={(e) => beginObjDrag(e, o, "corner-tr")} />
+            <CornerHandle cx={rectX} cy={rectY + rectH}
+              onMouseDown={(e) => beginObjDrag(e, o, "corner-bl")} />
+            <CornerHandle cx={rectX + rectW} cy={rectY + rectH}
+              onMouseDown={(e) => beginObjDrag(e, o, "corner-br")} />
+          </>
+        )}
+      </g>
     );
   };
 
@@ -203,57 +361,47 @@ const PlanViewer = ({
 
       {/* Zoom controls */}
       <div className="absolute top-3 right-3 z-20 glass rounded-lg border border-border p-1 flex items-center gap-1">
-        <Button
-          data-testid={ANALYSIS.zoomOut}
-          variant="ghost"
-          size="icon"
-          className="w-7 h-7"
-          onClick={zoomOut}
-        >
+        <Button data-testid={ANALYSIS.zoomOut} variant="ghost" size="icon" className="w-7 h-7" onClick={zoomOut}>
           <Minus className="w-3.5 h-3.5" />
         </Button>
         <span className="text-xs font-mono-plex min-w-[36px] text-center">
           {(zoom * 100).toFixed(0)}%
         </span>
-        <Button
-          data-testid={ANALYSIS.zoomIn}
-          variant="ghost"
-          size="icon"
-          className="w-7 h-7"
-          onClick={zoomIn}
-        >
+        <Button data-testid={ANALYSIS.zoomIn} variant="ghost" size="icon" className="w-7 h-7" onClick={zoomIn}>
           <Plus className="w-3.5 h-3.5" />
         </Button>
-        <Button
-          data-testid={ANALYSIS.zoomReset}
-          variant="ghost"
-          size="icon"
-          className="w-7 h-7"
-          onClick={reset}
-        >
+        <Button data-testid={ANALYSIS.zoomReset} variant="ghost" size="icon" className="w-7 h-7" onClick={reset}>
           <RotateCcw className="w-3.5 h-3.5" />
         </Button>
       </div>
+
+      {/* Calibration hint */}
+      {calibrateMode && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 glass border border-primary rounded-full px-4 py-1.5 text-xs font-mono-plex text-primary shadow-lg">
+          {calibPts.length === 0
+            ? "Click the start of a known-length segment"
+            : "Click the end of the segment"}
+        </div>
+      )}
 
       {/* Canvas */}
       <div
         ref={wrapRef}
         data-testid={ANALYSIS.planViewer}
-        className="relative bp-grid-sm overflow-hidden select-none plan-canvas-cursor"
+        className={`relative bp-grid-sm overflow-hidden select-none ${
+          calibrateMode ? "cursor-crosshair" : "plan-canvas-cursor"
+        }`}
         style={{ height: 600 }}
-        onMouseDown={onMouseDown}
-        onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp}
-        onMouseLeave={() => {
-          onMouseUp();
-          setHover(null);
-        }}
+        onMouseDown={onCanvasMouseDown}
+        onMouseMove={onCanvasMouseMove}
+        onMouseUp={onCanvasMouseUp}
+        onMouseLeave={onCanvasLeave}
       >
         <div
           style={{
             transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
             transformOrigin: "center center",
-            transition: drag ? "none" : "transform 0.12s ease",
+            transition: panDrag || objDrag ? "none" : "transform 0.12s ease",
             width: svgW,
             height: svgH,
             position: "absolute",
@@ -273,12 +421,58 @@ const PlanViewer = ({
             />
           )}
           <svg
+            ref={svgRef}
             width={svgW}
             height={svgH}
             viewBox={`0 0 ${svgW} ${svgH}`}
             className="absolute inset-0"
           >
             {visible.map(renderObj)}
+
+            {/* Calibration overlay */}
+            {calibrateMode && calibPts.length >= 1 && (
+              <g>
+                <circle
+                  cx={calibPts[0][0] * svgW}
+                  cy={calibPts[0][1] * svgH}
+                  r={5}
+                  fill="#ef4444"
+                  stroke="white"
+                  strokeWidth={1.5}
+                />
+                {calibPts.length === 1 && mousePt && (
+                  <line
+                    x1={calibPts[0][0] * svgW}
+                    y1={calibPts[0][1] * svgH}
+                    x2={mousePt[0] * svgW}
+                    y2={mousePt[1] * svgH}
+                    stroke="#ef4444"
+                    strokeWidth={2}
+                    strokeDasharray="6 4"
+                  />
+                )}
+                {calibPts.length === 2 && (
+                  <>
+                    <line
+                      x1={calibPts[0][0] * svgW}
+                      y1={calibPts[0][1] * svgH}
+                      x2={calibPts[1][0] * svgW}
+                      y2={calibPts[1][1] * svgH}
+                      stroke="#ef4444"
+                      strokeWidth={2}
+                    />
+                    <circle
+                      cx={calibPts[1][0] * svgW}
+                      cy={calibPts[1][1] * svgH}
+                      r={5}
+                      fill="#ef4444"
+                      stroke="white"
+                      strokeWidth={1.5}
+                    />
+                  </>
+                )}
+              </g>
+            )}
           </svg>
         </div>
       </div>
@@ -302,7 +496,7 @@ const PlanViewer = ({
           )}
           {hover.obj.length_ft != null && (
             <div className="text-muted-foreground">
-              Length: {hover.obj.length_ft.toFixed(1)} ft
+              Length: {Number(hover.obj.length_ft).toFixed(1)} ft
             </div>
           )}
           <div className="text-muted-foreground">
@@ -322,6 +516,33 @@ const PlanViewer = ({
     </div>
   );
 };
+
+const CornerHandle = ({ cx, cy, onMouseDown }) => (
+  <rect
+    x={cx - 5}
+    y={cy - 5}
+    width={10}
+    height={10}
+    fill="white"
+    stroke="hsl(var(--primary))"
+    strokeWidth={1.5}
+    style={{ cursor: "nwse-resize" }}
+    onMouseDown={onMouseDown}
+  />
+);
+
+const PointHandle = ({ cx, cy, onMouseDown }) => (
+  <circle
+    cx={cx}
+    cy={cy}
+    r={6}
+    fill="white"
+    stroke="hsl(var(--primary))"
+    strokeWidth={1.5}
+    style={{ cursor: "grab" }}
+    onMouseDown={onMouseDown}
+  />
+);
 
 const labelFor = (o) => {
   const map = {

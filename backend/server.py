@@ -21,6 +21,7 @@ from analyzer import (
     BuildingData,
     DetectedObject,
     analyze_floor_plan,
+    calibrate_scale,
     recompute_from_objects,
 )
 from pdf_report import build_report_pdf
@@ -85,6 +86,12 @@ class ObjectUpdate(BaseModel):
 class AnalysisUpdate(BaseModel):
     detected_objects: List[ObjectUpdate]
     room_list: Optional[List[Dict[str, Any]]] = None
+
+
+class CalibrationRequest(BaseModel):
+    p1: List[float] = Field(..., min_length=2, max_length=2)
+    p2: List[float] = Field(..., min_length=2, max_length=2)
+    known_ft: float = Field(..., gt=0)
 
 
 # --------------------------------------------------------------------------
@@ -299,6 +306,25 @@ async def delete_analysis(aid: str):
     if r.deleted_count == 0:
         raise HTTPException(404, "Analysis not found")
     return {"deleted": True}
+
+
+@api.post("/analysis/{aid}/calibrate")
+async def calibrate(aid: str, body: CalibrationRequest):
+    """Apply a user-drawn scale calibration and rescale all measurements."""
+    doc = await analyses_col.find_one({"id": aid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Analysis not found")
+    bd = _doc_to_bd(doc)
+    if bd.preview_width <= 0 or bd.preview_height <= 0:
+        raise HTTPException(400, "Preview dimensions missing")
+    bd = calibrate_scale(bd, body.p1, body.p2, body.known_ft)
+    bd = recompute_from_objects(bd)
+    await analyses_col.update_one(
+        {"id": aid},
+        {"$set": {"data": bd.to_dict(), "updated_at": _now_iso()}},
+    )
+    doc["data"] = bd.to_dict()
+    return _bd_to_response(bd, doc)
 
 
 @api.get("/analysis/{aid}/report")

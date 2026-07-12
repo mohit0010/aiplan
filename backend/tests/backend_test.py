@@ -15,6 +15,7 @@ if not BASE_URL:
                 break
 
 DEMO_ID = "demo-ce39f09c"
+APPROX_ID = "demo-approx-1"
 
 
 @pytest.fixture(scope="module")
@@ -154,3 +155,76 @@ def test_analyze_valid_png_expected_budget_error(api):
 def test_delete_nonexistent_returns_404(api):
     r = api.delete(f"{BASE_URL}/api/analysis/does-not-exist-xyz", timeout=15)
     assert r.status_code == 404
+
+
+# ---------- Calibration (iteration 2) ----------
+class TestCalibration:
+    """Tests for POST /api/analysis/{aid}/calibrate."""
+
+    def test_calibrate_success_rescales_measurements(self, api):
+        # First calibrate with a distinct known_ft to force a different scale
+        # (guards against re-runs where prior state already matches the target).
+        api.post(f"{BASE_URL}/api/analysis/{APPROX_ID}/calibrate",
+                 json={"p1": [0.1, 0.5], "p2": [0.9, 0.5], "known_ft": 25.0},
+                 timeout=15)
+        pre = api.get(f"{BASE_URL}/api/analysis/{APPROX_ID}", timeout=15).json()
+        pre_wall = pre["wall_length"]
+
+        body = {"p1": [0.08, 0.11], "p2": [0.92, 0.11], "known_ft": 50.0}
+        r = api.post(f"{BASE_URL}/api/analysis/{APPROX_ID}/calibrate",
+                     json=body, timeout=15)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        # scale flags flipped
+        assert d["scale_detected"] is True
+        assert d["approximate"] is False
+        assert "User calibrated" in (d["scale_note"] or "")
+        assert "ft/px" in d["scale_note"]
+        # wall length recomputed (should be a real number)
+        assert isinstance(d["wall_length"], (int, float))
+        assert d["wall_length"] > 0
+        # confidence bumped >=92
+        assert d["confidence"] >= 92.0
+        # built_up_area now populated (rooms in seed have rect w/h)
+        assert d["built_up_area_sqft"] is not None
+        assert d["built_up_area_sqft"] > 0
+        # different from previous state
+        assert d["wall_length"] != pre_wall, (
+            f"wall_length unchanged: {pre_wall} -> {d['wall_length']}"
+        )
+
+    def test_calibrate_persists(self, api):
+        """GET after calibrate returns the same calibrated values."""
+        body = {"p1": [0.1, 0.5], "p2": [0.9, 0.5], "known_ft": 40.0}
+        post = api.post(f"{BASE_URL}/api/analysis/{APPROX_ID}/calibrate",
+                        json=body, timeout=15).json()
+        got = api.get(f"{BASE_URL}/api/analysis/{APPROX_ID}", timeout=15).json()
+        assert got["scale_detected"] is True
+        assert got["approximate"] is False
+        assert got["scale_note"] == post["scale_note"]
+        assert got["wall_length"] == post["wall_length"]
+
+    def test_calibrate_zero_known_ft_422(self, api):
+        body = {"p1": [0.1, 0.1], "p2": [0.9, 0.1], "known_ft": 0}
+        r = api.post(f"{BASE_URL}/api/analysis/{APPROX_ID}/calibrate",
+                     json=body, timeout=15)
+        assert r.status_code == 422, r.text
+
+    def test_calibrate_negative_known_ft_422(self, api):
+        body = {"p1": [0.1, 0.1], "p2": [0.9, 0.1], "known_ft": -5}
+        r = api.post(f"{BASE_URL}/api/analysis/{APPROX_ID}/calibrate",
+                     json=body, timeout=15)
+        assert r.status_code == 422, r.text
+
+    def test_calibrate_bad_points_422(self, api):
+        # p1 must be a 2-element list
+        body = {"p1": [0.1], "p2": [0.9, 0.1], "known_ft": 10}
+        r = api.post(f"{BASE_URL}/api/analysis/{APPROX_ID}/calibrate",
+                     json=body, timeout=15)
+        assert r.status_code == 422, r.text
+
+    def test_calibrate_nonexistent_404(self, api):
+        body = {"p1": [0.1, 0.1], "p2": [0.9, 0.1], "known_ft": 10.0}
+        r = api.post(f"{BASE_URL}/api/analysis/nonexistent/calibrate",
+                     json=body, timeout=15)
+        assert r.status_code == 404, r.text

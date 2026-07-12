@@ -14,6 +14,7 @@ import {
   Grid2x2,
   Info,
   Loader2,
+  Compass,
 } from "lucide-react";
 import Nav from "../components/Navbar";
 import PlanViewer from "../components/PlanViewer";
@@ -21,8 +22,18 @@ import EditToolbar from "../components/EditToolbar";
 import StatCard from "../components/StatCard";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
+import { Input } from "../components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "../components/ui/dialog";
 import { toast } from "sonner";
 import {
+  calibrateAnalysis,
   getAnalysis,
   previewUrl,
   reportUrl,
@@ -40,6 +51,10 @@ const AnalysisPage = () => {
   const [editMode, setEditMode] = useState(false);
   const [saving, setSaving] = useState(false);
   const [objects, setObjects] = useState([]);
+  const [calibMode, setCalibMode] = useState(false);
+  const [pendingCalib, setPendingCalib] = useState(null); // {p1,p2}
+  const [knownFt, setKnownFt] = useState("");
+  const [calibrating, setCalibrating] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -118,6 +133,48 @@ const AnalysisPage = () => {
     }
   };
 
+  const handleObjectChange = (newObj) => {
+    setObjects((os) => os.map((o) => (o.id === newObj.id ? newObj : o)));
+  };
+
+  const handleCalibrateSegment = (p1, p2) => {
+    setPendingCalib({ p1, p2 });
+    setKnownFt("");
+  };
+
+  const confirmCalibration = async () => {
+    const val = parseFloat(knownFt);
+    if (!pendingCalib || !val || val <= 0) {
+      toast.error("Enter a positive length in feet.");
+      return;
+    }
+    try {
+      setCalibrating(true);
+      const updated = await calibrateAnalysis(
+        id,
+        pendingCalib.p1,
+        pendingCalib.p2,
+        val
+      );
+      setData(updated);
+      setObjects(updated.detected_objects || []);
+      toast.success("Scale calibrated — measurements updated");
+      setPendingCalib(null);
+      setCalibMode(false);
+      setKnownFt("");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || e.message);
+    } finally {
+      setCalibrating(false);
+    }
+  };
+
+  const cancelCalibration = () => {
+    setPendingCalib(null);
+    setKnownFt("");
+    setCalibMode(false);
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-background">
@@ -187,10 +244,25 @@ const AnalysisPage = () => {
 
           <div className="flex flex-wrap items-center gap-2">
             <Button
+              data-testid={ANALYSIS.calibrateBtn}
+              variant={calibMode ? "default" : "outline"}
+              className="rounded-full gap-1.5"
+              onClick={() => {
+                if (editMode) setEditMode(false);
+                setCalibMode((m) => !m);
+              }}
+            >
+              <Compass className="w-4 h-4" />
+              {calibMode ? "Calibrating…" : "Calibrate scale"}
+            </Button>
+            <Button
               data-testid={ANALYSIS.editModeToggle}
               variant={editMode ? "default" : "outline"}
               className="rounded-full gap-1.5"
-              onClick={() => setEditMode((e) => !e)}
+              onClick={() => {
+                if (calibMode) setCalibMode(false);
+                setEditMode((e) => !e);
+              }}
             >
               <Edit3 className="w-4 h-4" />
               {editMode ? "Editing" : "Edit mode"}
@@ -212,13 +284,25 @@ const AnalysisPage = () => {
         {data.approximate && !data.scale_detected && (
           <div className="mt-4 flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 px-4 py-3 text-sm">
             <Info className="w-4 h-4 mt-0.5 shrink-0" />
-            <div>
+            <div className="flex-1">
               <div className="font-medium">No drawing scale detected.</div>
               <div className="text-xs opacity-80 mt-0.5">
-                Measurements are AI-estimated using standard residential
-                proportions. Verify on site before construction decisions.
+                Measurements are AI-estimated. Click{" "}
+                <span className="font-semibold">Calibrate scale</span> and mark
+                a segment of known length to convert everything to precise feet.
               </div>
             </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="rounded-full border-amber-500/60 text-amber-800 dark:text-amber-200 hover:bg-amber-500/20"
+              onClick={() => {
+                if (editMode) setEditMode(false);
+                setCalibMode(true);
+              }}
+            >
+              Calibrate now
+            </Button>
           </div>
         )}
       </div>
@@ -234,6 +318,9 @@ const AnalysisPage = () => {
             selectedId={selectedId}
             onSelect={(o) => setSelectedId(o.id)}
             editMode={editMode}
+            onObjectChange={handleObjectChange}
+            calibrateMode={calibMode}
+            onCalibrate={handleCalibrateSegment}
           />
 
           {/* Stat cards */}
@@ -418,6 +505,59 @@ const AnalysisPage = () => {
         hasSelection={!!selected}
         saving={saving}
       />
+
+      <Dialog
+        open={!!pendingCalib}
+        onOpenChange={(o) => {
+          if (!o) cancelCalibration();
+        }}
+      >
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle className="font-display">
+              Set scale from segment
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Enter the real-world length of the segment you just drew. All wall,
+              door and window measurements will be recomputed.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <label className="overline">Known length (feet)</label>
+            <Input
+              data-testid={ANALYSIS.calibrateDialogInput}
+              type="number"
+              min="0"
+              step="0.1"
+              placeholder="e.g. 10"
+              value={knownFt}
+              onChange={(e) => setKnownFt(e.target.value)}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") confirmCalibration();
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={cancelCalibration}
+              data-testid={ANALYSIS.calibrateDialogCancel}
+              className="rounded-full"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={confirmCalibration}
+              disabled={calibrating}
+              data-testid={ANALYSIS.calibrateDialogConfirm}
+              className="rounded-full"
+            >
+              {calibrating ? "Calibrating…" : "Apply scale"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

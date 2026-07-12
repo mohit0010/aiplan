@@ -39,6 +39,10 @@ export const ANALYSIS = {
   zoomIn: "viewer-zoom-in",
   zoomOut: "viewer-zoom-out",
   zoomReset: "viewer-zoom-reset",
+  calibrateBtn: "calibrate-scale-btn",
+  calibrateDialogInput: "calibrate-length-input",
+  calibrateDialogConfirm: "calibrate-confirm-btn",
+  calibrateDialogCancel: "calibrate-cancel-btn",
 };
 
 export const HISTORY = {

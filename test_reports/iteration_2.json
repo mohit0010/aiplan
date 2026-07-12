@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 2: full validation of new SCALE CALIBRATION and MOVE/RESIZE (edit-mode) features plus regression on iteration-1 endpoints. Extended backend_test.py from 9 to 15 pytest cases — 15/15 PASSED (calibrate success, GET-persistence, known_ft=0 -> 422, known_ft<0 -> 422, malformed p1 -> 422, nonexistent aid -> 404, plus iteration-1 regression). Frontend Playwright: verified /analysis/demo-approx-1 calibrate button + hint + dialog + Apply → toast 'Scale calibrated — measurements updated' + stat-total-wall changed from 226.5 ft → 586.7 ft + 'User calibrated · X ft/px · Confidence 92%' appears + banner disappears. Verified /analysis/demo-ce39f09c edit-mode: rect selection shows 4 white corner handles (width=10, stroke=hsl(var(--primary))), wall path selection shows circular endpoint handles (r=6, fill=white), corner drag & body drag do NOT crash, Save button triggers toast 'Analysis updated'. Mutual exclusivity between Calibrate scale and Edit mode buttons works both directions. Cancel dialog also verified.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/analyze", "issue": "EMERGENT_LLM_KEY at $0 balance — /api/analyze still returns 500 with 'Budget exceeded'. Per iteration-2 handoff note, this is environment/billing, not a code bug. The endpoint DOES have a 402 branch (server.py L200-205) that would fire if the exception message contains 'budget'/'quota'/'insufficient', but the raised RuntimeError from emergentintegrations does not include those keywords, so it falls through to a generic 500. Cosmetic — consider matching on 'Budget' with case-insensitive substring on the full chain."},
+      {"endpoint": "POST /api/analysis/{aid}/calibrate", "issue": "When p1 == p2 (degenerate segment, seg_px=0), calibrate_scale silently returns without applying scale, but the endpoint still returns 200 with unchanged data (server.py L320). Consider raising 400 with a clear 'Segment length must be > 0' message. Not a P0."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Analysis viewer (calibrate mode)", "issues": ["The red dashed line during segment drawing uses hard-coded #ef4444 (nice) but does not honour the app's --primary token — inconsistent with the rest of the theme when dark mode is active. Minor."]},
+      {"screen": "Wall polyline selection", "issues": ["Wall <path> elements have zero bbox-height on perfectly horizontal segments. Real users click the visible stroke and CSS class 'overlay-hit' widens the hit area, but Playwright/E2E selectors that rely on Element.getBoundingClientRect (h=0) may miss the click target. Consider giving wall paths an invisible 'pointer-events: stroke' widened variant or stroke-linecap=butt with a min stroke-width — would improve automated-test robustness. Non-blocking for real users."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "None blocking. Optional: broaden the 402/402 branch in server.py's /api/analyze exception matcher (see minor issue #1).",
+    "Optional: return 400 when calibration segment length collapses to 0 pixels.",
+    "Note for main agent: demo-approx-1 wall_length is now permanently rescaled (currently ~586 ft after 50-ft calibration) — this is expected per iteration-2 instructions (demo-approx-1 is a throw-away seed)."
+  ],
+  "critical_code_review_comments": [
+    "analyzer.py calibrate_scale L361-364: uses `raw` normalized delta * preview_width for seg_px — this is correct because ft_per_px is expressed per PREVIEW pixel, matching how object.points and .w/.h are scaled elsewhere. Good.",
+    "analyzer.py calibrate_scale L398-405: built_up_area is the naive sum of rect areas — per handoff this is by design, room rects overlap with bath so total may look inflated; documented in PRD.",
+    "PlanViewer.jsx: beginObjDrag captures a JSON.parse(JSON.stringify(obj)) snapshot per drag — fine for correctness, but for many rapid drags could produce garbage; not a concern at v1 scale.",
+    "PlanViewer.jsx handleObjMove L179-224: nice clean state machine (move / corner-* / point-*). Consider clamping x,y,w,h to [0,1] after resize so users cannot drag objects off-canvas.",
+    "server.py CalibrationRequest: uses Field(gt=0) for known_ft — good. Points validated by min_length/max_length=2 — good. Consider also validating each coord ∈ [0,1] to reject clearly wrong client payloads earlier."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "100% (15/15 pytest)", "frontend": "100% (calibrate flow + edit-mode move/resize + save + mutual exclusivity + cancel dialog)"},
+  "test_credentials": "N/A — no auth in v1. IDs used: demo-ce39f09c (calibrated seed), demo-approx-1 (calibration target).",
+  "seed_data_creation": "None. demo-approx-1 was calibrated multiple times as part of tests (this is by design, per handoff — it is a throw-away seed). demo-ce39f09c was modified via body drag + Save; wall_length remains 260.2 ft (matches iteration-1 residual state).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend + Frontend for iteration-2 features (calibrate + move/resize) are green. Playwright click on wall <path> with zero-height bbox needs to use dispatchEvent or explicit coordinate .mouse.click — noted for future E2E tests. demo-approx-1 permanent state is now scale_note='User calibrated · X ft/px' and wall_length varies with the last test's known_ft; do NOT assume it's back to 'No scale detected'. The banner 'No drawing scale detected.' will NOT appear on demo-approx-1 anymore until someone reseeds it. EMERGENT_LLM_KEY still $0 — /api/analyze returns 500 with Budget-exceeded raw text.",
+  "rca of the issue": "N/A — no blocking bugs."
+}
