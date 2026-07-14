@@ -22,6 +22,7 @@ from analyzer import (
     DetectedObject,
     aggregate_building_data,
     analyze_document,
+    analyze_document_heuristic,
     analyze_floor_plan,
     calibrate_scale,
     recompute_from_objects,
@@ -70,6 +71,7 @@ class AnalysisSummary(BaseModel):
     confidence: float
     approximate: bool
     page_count: int = 1
+    analysis_mode: str = "llm"
 
 
 class ObjectUpdate(BaseModel):
@@ -156,6 +158,8 @@ def _bd_to_response(bd: BuildingData, doc: Dict[str, Any],
         "preview_width": bd.preview_width,
         "preview_height": bd.preview_height,
         "preview_image": preview,
+        "analysis_mode": doc.get("analysis_mode", "llm"),
+        "fallback_note": doc.get("fallback_note", ""),
     }
 
 
@@ -216,8 +220,13 @@ async def health():
 
 
 @api.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-    """Upload a plan and run analysis. Returns full BuildingData JSON."""
+async def analyze(file: UploadFile = File(...), mode: str = "auto"):
+    """Upload a plan and run analysis.
+    mode:
+      - "llm"       → force Gemini vision (fails if key unavailable)
+      - "heuristic" → force OpenCV + Tesseract (LLM-free, offline)
+      - "auto"      → try LLM first, fall back to heuristic on quota/error
+    """
     if not file.filename:
         raise HTTPException(400, "No filename")
     ext = os.path.splitext(file.filename)[1].lower()
@@ -231,10 +240,46 @@ async def analyze(file: UploadFile = File(...)):
         raise HTTPException(400, f"File too large (>{MAX_UPLOAD_MB} MB)")
 
     analysis_id = str(uuid.uuid4())
-    logger.info("Analyzing %s (%d bytes) -> %s", file.filename, len(raw), analysis_id)
+    logger.info("Analyzing %s (%d bytes) mode=%s -> %s",
+                file.filename, len(raw), mode, analysis_id)
+
+    used_mode = mode
+    fallback_note = ""
+
+    if mode not in ("llm", "heuristic", "auto"):
+        raise HTTPException(400, "mode must be one of: llm, heuristic, auto")
+
+    async def _try_llm():
+        return await analyze_document(raw, file.filename, session_id=analysis_id)
+
+    def _try_heuristic():
+        return analyze_document_heuristic(raw, file.filename)
 
     try:
-        results = await analyze_document(raw, file.filename, session_id=analysis_id)
+        if mode == "heuristic":
+            results = _try_heuristic()
+            used_mode = "heuristic"
+        elif mode == "llm":
+            results = await _try_llm()
+            used_mode = "llm"
+        else:  # auto
+            try:
+                results = await _try_llm()
+                used_mode = "llm"
+            except Exception as e:
+                msg = str(e).lower()
+                if any(k in msg for k in ("budget", "quota", "insufficient",
+                                          "not configured", "api_key")):
+                    logger.warning("LLM unavailable (%s) — falling back to heuristic", e)
+                    results = _try_heuristic()
+                    used_mode = "heuristic"
+                    fallback_note = ("LLM vision unavailable — used local "
+                                     "heuristic pipeline. Run Calibrate scale "
+                                     "for real measurements.")
+                else:
+                    raise
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Analysis failed")
         msg = str(e)
@@ -242,13 +287,15 @@ async def analyze(file: UploadFile = File(...)):
         if "budget" in low or "quota" in low or "insufficient" in low:
             raise HTTPException(
                 status_code=402,
-                detail=("AI vision quota exhausted. Top up your Emergent Universal "
-                        "Key from Profile → Universal Key → Add Balance, then retry."),
+                detail=("AI vision quota exhausted. Retry with mode=heuristic "
+                        "for the LLM-free pipeline, or top up your Emergent "
+                        "Universal Key at Profile → Universal Key → Add Balance."),
             )
         if "not configured" in low or "api_key" in low:
             raise HTTPException(
                 status_code=503,
-                detail="AI vision service is not configured on this deployment.",
+                detail=("AI vision service is not configured. Use mode=heuristic "
+                        "for the LLM-free pipeline."),
             )
         raise HTTPException(500, f"Analysis failed: {msg}")
 
@@ -267,14 +314,18 @@ async def analyze(file: UploadFile = File(...)):
         "filename": file.filename,
         "created_at": _now_iso(),
         "page_count": len(pages_docs),
+        "analysis_mode": used_mode,
+        "fallback_note": fallback_note,
         "data": aggregate.to_dict(),
-        # first-page preview at top level for backward compat
         "preview_b64": pages_docs[0]["preview_b64"],
         "pages": pages_docs,
     }
     await analyses_col.insert_one(doc)
 
-    return _bd_to_response(aggregate, doc)
+    resp = _bd_to_response(aggregate, doc)
+    resp["analysis_mode"] = used_mode
+    resp["fallback_note"] = fallback_note
+    return resp
 
 
 @api.get("/analysis/{aid}")
@@ -420,6 +471,7 @@ async def list_analyses():
             confidence=data.get("confidence", 0),
             approximate=data.get("approximate", True),
             page_count=d.get("page_count", 1),
+            analysis_mode=d.get("analysis_mode", "llm"),
         ))
     return out
 

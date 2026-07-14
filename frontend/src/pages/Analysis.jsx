@@ -284,6 +284,20 @@ const AnalysisPage = () => {
               <Badge variant="outline" className="rounded-full">
                 {data.approximate ? "Approximate" : "Measured"}
               </Badge>
+              {(aggregate?.analysis_mode || data.analysis_mode) && (
+                <Badge
+                  variant="outline"
+                  className={`rounded-full ${
+                    (aggregate?.analysis_mode || data.analysis_mode) === "heuristic"
+                      ? "border-amber-500/60 text-amber-700 dark:text-amber-300"
+                      : "border-primary/50 text-primary"
+                  }`}
+                >
+                  {(aggregate?.analysis_mode || data.analysis_mode) === "heuristic"
+                    ? "Local · LLM-free"
+                    : "AI Vision · Gemini 3"}
+                </Badge>
+              )}
               <span>·</span>
               <span>
                 {data.scale_detected

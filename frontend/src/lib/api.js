@@ -5,11 +5,12 @@ export const API_BASE = `${BACKEND_URL}/api`;
 
 export const api = axios.create({ baseURL: API_BASE });
 
-export async function uploadPlan(file, onProgress) {
+export async function uploadPlan(file, onProgress, mode = "auto") {
   const form = new FormData();
   form.append("file", file);
   const res = await api.post("/analyze", form, {
     headers: { "Content-Type": "multipart/form-data" },
+    params: { mode },
     onUploadProgress: (e) => {
       if (onProgress && e.total) {
         onProgress(Math.round((e.loaded / e.total) * 100));

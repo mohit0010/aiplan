@@ -1,0 +1,54 @@
+{
+  "summary": "Iteration 5 (OPTION A: heuristic pipeline + mode toggle). Backend: added /app/backend/tests/test_iteration5_modes.py with 7 new tests covering mode=heuristic|llm|auto|invalid, heuristic multi-page PDF, calibration on heuristic output, and analysis_mode field on GET /api/analyses. ALL 7 new tests PASS. Full regression: /app/backend/tests/backend_test.py 25/25 pytest cases STILL PASS. Frontend: Playwright verified — three mode chips visible with correct data-testids (upload-mode-auto|llm|heuristic), Auto is selected by default (bg-primary), each chip updates the description hint text correctly, uploading a PNG with 'Local' chip active sends POST /api/analyze?mode=heuristic (network capture confirmed), the resulting /analysis/{id} page shows the 'Local · LLM-free' badge, and legacy demo-ce39f09c shows 'AI Vision · Gemini 3' badge. Multi-page page selector and PDF download links still present.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/analyze?mode=llm",
+        "issue": "During this test the EMERGENT_LLM_KEY currently has balance so mode=llm succeeded with analysis_mode='llm'. If balance is exhausted, the strict-mode branch will raise. The 402 keyword match in server.py L287 still relies on 'budget'/'quota'/'insufficient' substrings — same iteration-2 minor carry-over."
+      },
+      {
+        "endpoint": "POST /api/analysis/{aid}/calibrate",
+        "issue": "Iteration-3 carry-over: p1==p2 (seg_px=0) returns 200 unchanged instead of 400. Non-zero degenerate segments still correctly rejected (server.py L507)."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5_modes.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iteration5_modes.xml",
+    "/app/test_reports/pytest/iteration5_regression.xml"
+  ],
+  "action_items": [
+    "None blocking — feature implementation is fully working end-to-end.",
+    "Optional (carry-over from iter 2): broaden 402 keyword match in /api/analyze error handler for future budget-exhausted paths.",
+    "Optional (carry-over from iter 3): reject p1==p2 calibrate with 400."
+  ],
+  "critical_code_review_comments": [
+    "server.py L249: mode-validation happens AFTER file bytes are read but ORDER OK because check is inside try block correctly. Consider validating mode=='invalid' BEFORE reading file to fail faster on bad params (minor).",
+    "server.py L269-280: auto-mode fallback catches all `Exception` and checks 5 keyword substrings (budget/quota/insufficient/not configured/api_key). Any other transient LLM error (network, timeout, JSON parse error) will bubble up as 500 instead of gracefully falling back. Consider broader fallback for auto mode.",
+    "heuristic_analyzer.py L54-56: near-diagonal noise filter (`abs(dx-dy)<4`) rejects ONLY near-45° lines. Real floor plans occasionally have angled walls; not a bug but worth documenting.",
+    "heuristic_analyzer.py L131: only tokens matching COMMON_ROOM_KEYWORDS are accepted. If a plan uses uncommon labels ('Den', 'Nook', 'Pantry', 'Playroom') they will be missed. Consider expanding keyword list or adding a fallback (any 3+ char alpha token → room=unknown).",
+    "UploadDropzone.jsx L86-88: `label` says 'Analyzing plan with AI vision…' even when mode='heuristic'. Cosmetic: swap message based on selected mode.",
+    "UploadDropzone.jsx L214: the same data-testid `upload-analyze-button` is reused by both 'Select file' (L172) and 'Analyze plan' (L214) buttons. Not blocking (only one visible at a time) but two roles sharing one testid is slightly ambiguous.",
+    "Analysis.jsx L287: fallback chain `aggregate?.analysis_mode || data.analysis_mode` — good defensive coding. Note that legacy docs without analysis_mode in DB default to 'llm' via server.py L474 default (correct)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration5_modes.py (NEW)"
+  ],
+  "success_rate": {
+    "backend": "100% (7/7 new + 25/25 regression = 32/32 pytest)",
+    "frontend": "100% (mode chips + upload+mode=heuristic + badge + page selector + PDF link all verified via Playwright)"
+  },
+  "test_credentials": "N/A — no auth in v1.",
+  "seed_data_creation": "Test analyses created during runs were deleted at test end (heuristic single-page + 2-page PDF). Test-created UI analysis id=178b1eb0-... also cleaned up. Legacy demos (demo-ce39f09c, demo-approx-1, demo-multi-3f) intact.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 5 heuristic pipeline is fully wired end-to-end. Backend test file split: /app/backend/tests/backend_test.py (25 iteration 1-4 tests) + /app/backend/tests/test_iteration5_modes.py (7 new mode tests). Both files use pytest-xdist and run in <30s total. EMERGENT_LLM_KEY has balance right now (mode=llm succeeded during this iteration — different from iterations 2/3/4 where key was $0). If key is exhausted in future runs: test_llm_mode_strict_no_fallback tolerates 402/500/503, and test_auto_mode_returns_llm_or_heuristic tolerates either analysis_mode with matching fallback_note. To manually create a heuristic analysis: `curl -F file=@plan.png https://plan-metrics-1.preview.emergentagent.com/api/analyze?mode=heuristic`.",
+  "rca of the issue": "N/A — no bugs found in iteration 5 feature. Only carry-over minors from earlier iterations remain."
+}

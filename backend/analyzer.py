@@ -383,6 +383,31 @@ async def analyze_document(file_bytes: bytes, filename: str, session_id: str
     return out
 
 
+def analyze_document_heuristic(file_bytes: bytes, filename: str
+                               ) -> List[Tuple[BuildingData, bytes]]:
+    """
+    Pure OpenCV + Tesseract multi-page pipeline (no LLM). Returns same shape
+    as `analyze_document`. Wall lengths are zero until user calibrates scale.
+    """
+    from heuristic_analyzer import analyze_heuristic
+    lower = filename.lower()
+    if lower.endswith(".pdf"):
+        pngs = pdf_all_pages_to_images(file_bytes)
+        if not pngs:
+            raise ValueError("PDF has no readable pages")
+    else:
+        pngs = [normalize_input_to_png(file_bytes, filename)]
+
+    out: List[Tuple[BuildingData, bytes]] = []
+    for png in pngs:
+        img = Image.open(io.BytesIO(png))
+        w, h = img.size
+        result = analyze_heuristic(png)
+        bd = build_building_data(result, w, h)
+        out.append((bd, png))
+    return out
+
+
 def aggregate_building_data(bds: List[BuildingData]) -> BuildingData:
     """
     Combine per-page BuildingData into an aggregate view.

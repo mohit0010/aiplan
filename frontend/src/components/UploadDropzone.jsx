@@ -1,5 +1,5 @@
 import React, { useCallback, useRef, useState } from "react";
-import { UploadCloud, FileText, X, Loader2 } from "lucide-react";
+import { UploadCloud, FileText, X, Loader2, Sparkles, Cpu, Zap } from "lucide-react";
 import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ const UploadDropzone = () => {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("idle"); // idle | uploading | analyzing | done | error
   const [drag, setDrag] = useState(false);
+  const [mode, setMode] = useState("auto");
   const inputRef = useRef(null);
   const navigate = useNavigate();
 
@@ -53,9 +54,15 @@ const UploadDropzone = () => {
       const result = await uploadPlan(file, (p) => {
         setProgress(p);
         if (p >= 100) setStatus("analyzing");
-      });
+      }, mode);
       setStatus("done");
-      toast.success("Analysis complete");
+      if (result.fallback_note) {
+        toast.info(result.fallback_note);
+      } else {
+        toast.success(
+          `Analysis complete (${result.analysis_mode === "heuristic" ? "Local" : "AI Vision"})`
+        );
+      }
       navigate(`/analysis/${result.id}`);
     } catch (err) {
       setStatus("error");
@@ -122,6 +129,42 @@ const UploadDropzone = () => {
           Our vision model reads walls, doors, windows, dimensions and room
           labels in one pass.
         </p>
+
+        {/* Analysis mode toggle */}
+        <div className="w-full">
+          <div className="overline mb-2">Analysis mode</div>
+          <div className="inline-flex gap-1 rounded-full border border-border bg-background/70 p-1">
+            <ModeChip
+              icon={Zap}
+              label="Auto"
+              hint="LLM → local fallback"
+              active={mode === "auto"}
+              onClick={() => setMode("auto")}
+              testid={HOME.modeAuto}
+            />
+            <ModeChip
+              icon={Sparkles}
+              label="AI Vision"
+              hint="Gemini 3 Flash"
+              active={mode === "llm"}
+              onClick={() => setMode("llm")}
+              testid={HOME.modeLlm}
+            />
+            <ModeChip
+              icon={Cpu}
+              label="Local"
+              hint="OpenCV + OCR"
+              active={mode === "heuristic"}
+              onClick={() => setMode("heuristic")}
+              testid={HOME.modeHeuristic}
+            />
+          </div>
+          <div className="mt-2 text-[11px] text-muted-foreground font-mono-plex">
+            {mode === "auto" && "Tries AI vision first, gracefully falls back to the LLM-free pipeline if the key is unavailable."}
+            {mode === "llm" && "Uses Gemini 3 Flash vision. Highest accuracy — requires Emergent Universal Key with balance."}
+            {mode === "heuristic" && "Pure OpenCV + Tesseract. Runs fully offline. Calibrate scale afterwards for real measurements."}
+          </div>
+        </div>
 
         {!file && (
           <Button
@@ -190,3 +233,19 @@ const UploadDropzone = () => {
 };
 
 export default UploadDropzone;
+
+const ModeChip = ({ icon: Icon, label, hint, active, onClick, testid }) => (
+  <button
+    onClick={onClick}
+    data-testid={testid}
+    title={hint}
+    className={`h-8 px-3 rounded-full text-xs inline-flex items-center gap-1.5 transition-colors ${
+      active
+        ? "bg-primary text-primary-foreground shadow-sm"
+        : "text-muted-foreground hover:text-foreground"
+    }`}
+  >
+    <Icon className="w-3.5 h-3.5" />
+    {label}
+  </button>
+);
