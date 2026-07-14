@@ -267,17 +267,24 @@ async def analyze(file: UploadFile = File(...), mode: str = "auto"):
                 results = await _try_llm()
                 used_mode = "llm"
             except Exception as e:
-                msg = str(e).lower()
-                if any(k in msg for k in ("budget", "quota", "insufficient",
-                                          "not configured", "api_key")):
-                    logger.warning("LLM unavailable (%s) — falling back to heuristic", e)
-                    results = _try_heuristic()
-                    used_mode = "heuristic"
-                    fallback_note = ("LLM vision unavailable — used local "
-                                     "heuristic pipeline. Run Calibrate scale "
-                                     "for real measurements.")
+                # In auto mode, gracefully fall back on ANY LLM failure —
+                # the whole point of auto is "give me something usable".
+                logger.warning("LLM path failed (%s) — falling back to heuristic", e)
+                results = _try_heuristic()
+                used_mode = "heuristic"
+                msg_low = str(e).lower()
+                if any(k in msg_low for k in ("budget", "quota", "insufficient")):
+                    fallback_note = ("LLM quota exhausted — used local heuristic "
+                                     "pipeline. Run Calibrate scale for real "
+                                     "measurements.")
+                elif any(k in msg_low for k in ("not configured", "api_key")):
+                    fallback_note = ("LLM not configured — used local heuristic "
+                                     "pipeline. Run Calibrate scale for real "
+                                     "measurements.")
                 else:
-                    raise
+                    fallback_note = ("LLM vision temporarily unavailable — used "
+                                     "local heuristic pipeline. Run Calibrate "
+                                     "scale for real measurements.")
     except HTTPException:
         raise
     except Exception as e:

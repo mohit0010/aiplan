@@ -95,6 +95,26 @@ the same extracted building data.
       "Building totals · N pages" showing aggregate.
 - [x] History page shows a "{n} pages" pill next to multi-page rows.
 
+### Iteration 4 — Option A: LLM-free fallback (2026-02-14)
+- [x] **Heuristic analyzer** (`backend/heuristic_analyzer.py`): pure OpenCV +
+      Tesseract pipeline. Hough line detection for walls (classified
+      external vs internal by border proximity), HoughCircles for door
+      swings, Tesseract PSM 12 OCR for room labels with a bathroom keyword
+      list. Emits same `BuildingData` shape as the LLM path — every
+      downstream feature (calibration, edit mode, PDF report, multi-page)
+      works unchanged.
+- [x] `POST /api/analyze` accepts `?mode=auto|llm|heuristic`.
+      - `llm`: strict (fails on quota).
+      - `heuristic`: LLM-free (fully offline).
+      - `auto`: try LLM, gracefully fall back on ANY exception with a
+        friendly `fallback_note`.
+- [x] Response + history now include `analysis_mode` field.
+- [x] Frontend: 3-chip mode selector on the upload dropzone (Auto/AI
+      Vision/Local) with dynamic hint text and mode-aware progress label.
+- [x] Analysis page shows a `Local · LLM-free` or `AI Vision · Gemini 3`
+      badge next to the Approximate/Measured badge.
+- [x] Tesseract 5.3.0 + `pytesseract` added to backend deps.
+
 ## Known blocker (P0 — external)
 - **EMERGENT_LLM_KEY balance = 0** at runtime.
   All endpoints work; `POST /api/analyze` returns 500 with

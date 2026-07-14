@@ -80,11 +80,16 @@ const UploadDropzone = () => {
   };
 
   const busy = status === "uploading" || status === "analyzing";
+  const modeLabels = {
+    auto: "Analyzing plan (AI vision → local fallback)…",
+    llm: "Analyzing plan with Gemini vision…",
+    heuristic: "Running local OpenCV + OCR pipeline…",
+  };
   const label =
     status === "uploading"
       ? `Uploading… ${progress}%`
       : status === "analyzing"
-      ? "Analyzing plan with AI vision…"
+      ? modeLabels[mode]
       : "";
 
   return (
